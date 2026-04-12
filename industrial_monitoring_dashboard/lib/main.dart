@@ -4,12 +4,18 @@ import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:firebase_core/firebase_core.dart';
 import 'package:fl_chart/fl_chart.dart';
 import 'package:flutter/material.dart';
+import 'package:industrial_monitoring_dashboard/alert_notification_service.dart';
 import 'package:intl/intl.dart';
 import 'package:shimmer/shimmer.dart';
+
+/// SnackBars when alerts fire (all platforms; system notifications on mobile).
+final GlobalKey<ScaffoldMessengerState> appScaffoldMessengerKey =
+    GlobalKey<ScaffoldMessengerState>();
 
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
   await Firebase.initializeApp(options: DefaultFirebaseOptions.currentPlatform);
+  await AlertNotificationService.init();
   runApp(const IndustrialMonitoringApp());
 }
 
@@ -43,6 +49,7 @@ class _IndustrialMonitoringAppState extends State<IndustrialMonitoringApp> {
     );
 
     return MaterialApp(
+      scaffoldMessengerKey: appScaffoldMessengerKey,
       title: 'Industrial Monitoring',
       debugShowCheckedModeBanner: false,
       theme: ThemeData(
@@ -105,10 +112,9 @@ class _AppShellState extends State<AppShell> {
     ];
 
     return Scaffold(
-      body: AnimatedSwitcher(
-        duration: const Duration(milliseconds: 280),
-        switchInCurve: Curves.easeOutCubic,
-        child: KeyedSubtree(key: ValueKey<int>(_index), child: pages[_index]),
+      body: IndexedStack(
+        index: _index,
+        children: pages,
       ),
       floatingActionButton: FloatingActionButton.small(
         tooltip: widget.isDarkMode ? 'Switch to light mode' : 'Switch to dark mode',
@@ -159,6 +165,165 @@ class SensorReading {
   final DateTime timestamp;
 }
 
+/// Newest point by [SensorReading.timestamp] (cloud time), not Firestore doc order.
+SensorReading newestReading(List<SensorReading> readings) {
+  assert(readings.isNotEmpty);
+  final sorted = List<SensorReading>.from(readings)
+    ..sort((a, b) => a.timestamp.compareTo(b.timestamp));
+  return sorted.last;
+}
+
+/// Live alert rules (adjust thresholds here).
+bool vibrationAlertActive(double vibrationMmS) => vibrationMmS > 0;
+
+bool temperatureAlertActive(double tempC) => tempC >= 25.0;
+
+/// Default gap between points if timestamps are missing or irregular.
+const double _kDefaultSecondsPerDataPoint = 2.0;
+
+double _estimatedSecondsPerDataPoint(List<SensorReading> readings) {
+  if (readings.length < 2) return _kDefaultSecondsPerDataPoint;
+  final deltas = <double>[];
+  for (var i = 1; i < readings.length; i++) {
+    final sec = readings[i]
+        .timestamp
+        .difference(readings[i - 1].timestamp)
+        .inSeconds
+        .abs()
+        .toDouble();
+    if (sec > 0) deltas.add(sec);
+  }
+  if (deltas.isEmpty) return _kDefaultSecondsPerDataPoint;
+  final mean = deltas.reduce((a, b) => a + b) / deltas.length;
+  if (mean < 0.5 || mean > 86400) return _kDefaultSecondsPerDataPoint;
+  return mean;
+}
+
+/// 1 = newest sample, 3 = third-from-newest, etc.
+String _ordinalFromLatest(int k) {
+  return k == 1 ? '1 data point from latest' : '$k data points from latest';
+}
+
+String _formatRoughAgo(double seconds) {
+  if (seconds < 55) {
+    return '~${seconds.round()}s ago';
+  }
+  if (seconds < 3540) {
+    final m = (seconds / 60).round();
+    return '~${m}m ago';
+  }
+  if (seconds < 86400) {
+    final h = (seconds / 3600).round();
+    return '~${h}h ago';
+  }
+  final d = (seconds / 86400).round();
+  return '~${d}d ago';
+}
+
+Stream<List<Device>> devicesStream() => FirebaseFirestore.instance
+    .collection('devices')
+    .snapshots()
+    .map(
+      (snapshot) {
+        final list = snapshot.docs
+            .map((doc) => Device(id: doc.id, label: doc.id.toUpperCase()))
+            .toList(growable: false);
+        debugPrint(
+          '[Firestore] devices loaded: count=${list.length} '
+          'ids=[${list.map((d) => d.id).join(', ')}]',
+        );
+        return list;
+      },
+    );
+
+Stream<List<SensorReading>> sensorReadingsStream(String deviceId) =>
+    FirebaseFirestore.instance
+        .collection('devices')
+        .doc(deviceId)
+        .collection('data')
+        .limit(120)
+        .snapshots()
+        .map((snapshot) {
+      final readings = snapshot.docs
+          .map((doc) => readingFromMap(doc.data()))
+          .whereType<SensorReading>()
+          .toList();
+      readings.sort((a, b) => a.timestamp.compareTo(b.timestamp));
+
+      debugPrint(
+        '[Firestore] devices/$deviceId/data loaded: '
+        '${readings.length} points (doc ids: ${snapshot.docs.length})',
+      );
+      for (var i = 0; i < readings.length; i++) {
+        final r = readings[i];
+        debugPrint(
+          '  [$i] temp=${r.temperature.toStringAsFixed(2)} '
+          'hum=${r.humidity.toStringAsFixed(1)} '
+          'vib=${r.vibration.toStringAsFixed(3)} '
+          'ts=${r.timestamp.toIso8601String()}',
+        );
+      }
+      if (readings.isNotEmpty) {
+        final newest = newestReading(readings);
+        debugPrint(
+          '[Firestore] devices/$deviceId newest (by timestamp) → '
+          'temp=${newest.temperature.toStringAsFixed(2)} '
+          'hum=${newest.humidity.toStringAsFixed(1)} '
+          'vib=${newest.vibration.toStringAsFixed(3)} '
+          'ts=${newest.timestamp.toIso8601String()}',
+        );
+      }
+
+      return readings;
+    });
+
+SensorReading? readingFromMap(Map<String, dynamic> data) {
+  final tempValue = data['temperature'];
+  final humidityValue = data['humidity'];
+  final vibrationValue = data['vibration'];
+  final timestampValue = data['timestamp'] ?? data['timesp'] ?? data['time'];
+
+  if (tempValue == null || vibrationValue == null || timestampValue == null) {
+    return null;
+  }
+
+  final temperature = sensorToDouble(tempValue);
+  final humidity = sensorToDouble(humidityValue) ?? 0.0;
+  final vibration = sensorToDouble(vibrationValue);
+  if (temperature == null || vibration == null) {
+    return null;
+  }
+
+  DateTime timestamp;
+  if (timestampValue is Timestamp) {
+    timestamp = timestampValue.toDate();
+  } else if (timestampValue is num) {
+    timestamp = DateTime.fromMillisecondsSinceEpoch(
+      (timestampValue * 1000).toInt(),
+    );
+  } else if (timestampValue is String) {
+    final parsed = num.tryParse(timestampValue);
+    if (parsed == null) return null;
+    timestamp = DateTime.fromMillisecondsSinceEpoch((parsed * 1000).toInt());
+  } else {
+    return null;
+  }
+
+  return SensorReading(
+    temperature: temperature,
+    humidity: humidity,
+    vibration: vibration,
+    timestamp: timestamp,
+  );
+}
+
+double? sensorToDouble(dynamic value) {
+  if (value is num) return value.toDouble();
+  if (value is bool) return value ? 1.0 : 0.0;
+  if (value is String) return double.tryParse(value);
+  return null;
+}
+
 class DashboardScreen extends StatefulWidget {
   const DashboardScreen({super.key});
 
@@ -168,78 +333,54 @@ class DashboardScreen extends StatefulWidget {
 
 class _DashboardScreenState extends State<DashboardScreen> {
   String? _selectedDeviceId;
+  String? _alertTrackingDeviceId;
+  bool _prevHadVibrationAlert = false;
+  bool _prevHadTemperatureAlert = false;
 
-  Stream<List<Device>> get _devicesStream => FirebaseFirestore.instance
-      .collection('devices')
-      .snapshots()
-      .map((snapshot) => snapshot.docs
-          .map((doc) => Device(id: doc.id, label: doc.id.toUpperCase()))
-          .toList(growable: false));
-
-  Stream<List<SensorReading>> _readingStream(String deviceId) =>
-      FirebaseFirestore.instance
-          .collection('devices')
-          .doc(deviceId)
-          .collection('data')
-          .limit(120)
-          .snapshots()
-          .map((snapshot) {
-        final readings = snapshot.docs
-            .map((doc) => _readingFromMap(doc.data()))
-            .whereType<SensorReading>()
-            .toList();
-        readings.sort((a, b) => a.timestamp.compareTo(b.timestamp));
-        return readings;
-      });
-
-  SensorReading? _readingFromMap(Map<String, dynamic> data) {
-    final tempValue = data['temperature'];
-    final humidityValue = data['humidity'];
-    final vibrationValue = data['vibration'];
-    final timestampValue = data['timestamp'] ?? data['timesp'] ?? data['time'];
-
-    if (tempValue == null ||
-        humidityValue == null ||
-        vibrationValue == null ||
-        timestampValue == null) {
-      return null;
+  void _processAlertNotifications(
+    String deviceId,
+    String deviceLabel,
+    List<SensorReading> readings,
+  ) {
+    if (!mounted) return;
+    if (_alertTrackingDeviceId != deviceId) {
+      _alertTrackingDeviceId = deviceId;
+      _prevHadVibrationAlert = false;
+      _prevHadTemperatureAlert = false;
     }
 
-    final temperature = _toDouble(tempValue);
-    final humidity = _toDouble(humidityValue);
-    final vibration = _toDouble(vibrationValue);
-    if (temperature == null || humidity == null || vibration == null) {
-      return null;
-    }
+    final entries = liveAlertsFromReadings(deviceLabel, readings);
+    final hasVib = entries.any((e) => e.title == 'Vibration alert');
+    final hasTemp = entries.any((e) => e.title == 'Temperature alert');
 
-    DateTime timestamp;
-    if (timestampValue is Timestamp) {
-      timestamp = timestampValue.toDate();
-    } else if (timestampValue is num) {
-      timestamp = DateTime.fromMillisecondsSinceEpoch(
-        (timestampValue * 1000).toInt(),
+    if (hasVib && !_prevHadVibrationAlert) {
+      final msg =
+          entries.firstWhere((e) => e.title == 'Vibration alert').message;
+      unawaited(AlertNotificationService.showVibrationAlert(deviceLabel, msg));
+      appScaffoldMessengerKey.currentState?.showSnackBar(
+        SnackBar(
+          behavior: SnackBarBehavior.floating,
+          content: Text('Vibration alert — $deviceLabel'),
+          duration: const Duration(seconds: 6),
+        ),
       );
-    } else if (timestampValue is String) {
-      final parsed = num.tryParse(timestampValue);
-      if (parsed == null) return null;
-      timestamp = DateTime.fromMillisecondsSinceEpoch((parsed * 1000).toInt());
-    } else {
-      return null;
     }
 
-    return SensorReading(
-      temperature: temperature,
-      humidity: humidity,
-      vibration: vibration,
-      timestamp: timestamp,
-    );
-  }
+    if (hasTemp && !_prevHadTemperatureAlert) {
+      final msg =
+          entries.firstWhere((e) => e.title == 'Temperature alert').message;
+      unawaited(AlertNotificationService.showTemperatureAlert(deviceLabel, msg));
+      appScaffoldMessengerKey.currentState?.showSnackBar(
+        SnackBar(
+          behavior: SnackBarBehavior.floating,
+          content: Text('Temperature alert — $deviceLabel'),
+          duration: const Duration(seconds: 6),
+        ),
+      );
+    }
 
-  double? _toDouble(dynamic value) {
-    if (value is num) return value.toDouble();
-    if (value is bool) return value ? 1.0 : 0.0;
-    if (value is String) return double.tryParse(value);
-    return null;
+    _prevHadVibrationAlert = hasVib;
+    _prevHadTemperatureAlert = hasTemp;
   }
 
   HealthStatus _statusFromReadings(double vibration, double temp) {
@@ -248,13 +389,25 @@ class _DashboardScreenState extends State<DashboardScreen> {
     return HealthStatus.normal;
   }
 
+  /// Uses peak vibration/temperature in the loaded window so status matches the chart.
+  HealthStatus _statusFromReadingsList(List<SensorReading> readings) {
+    if (readings.isEmpty) return HealthStatus.normal;
+    final maxVibration = readings
+        .map((r) => r.vibration)
+        .reduce((a, b) => a > b ? a : b);
+    final maxTemp = readings
+        .map((r) => r.temperature)
+        .reduce((a, b) => a > b ? a : b);
+    return _statusFromReadings(maxVibration, maxTemp);
+  }
+
   @override
   Widget build(BuildContext context) {
     final spacing = MediaQuery.sizeOf(context).width > 700 ? 20.0 : 14.0;
 
     return SafeArea(
       child: StreamBuilder<List<Device>>(
-        stream: _devicesStream,
+        stream: devicesStream(),
         builder: (context, deviceSnapshot) {
           if (deviceSnapshot.connectionState == ConnectionState.waiting) {
             return _DashboardLoading(spacing: spacing);
@@ -288,7 +441,7 @@ class _DashboardScreenState extends State<DashboardScreen> {
           final selectedDevice = devices[selectedIndex];
 
           return StreamBuilder<List<SensorReading>>(
-            stream: _readingStream(selectedDevice.id),
+            stream: sensorReadingsStream(selectedDevice.id),
             builder: (context, readingSnapshot) {
               if (readingSnapshot.connectionState == ConnectionState.waiting) {
                 return _DashboardLoading(spacing: spacing);
@@ -326,15 +479,23 @@ class _DashboardScreenState extends State<DashboardScreen> {
                 );
               }
 
-              final latest = readings.last;
-              final status =
-                  _statusFromReadings(latest.vibration, latest.temperature);
+              final latest = newestReading(readings);
+              final status = _statusFromReadingsList(readings);
               final vibrationSpots = _toSpots(
                 readings.map((r) => r.vibration).toList(),
               );
               final temperatureSpots = _toSpots(
                 readings.map((r) => r.temperature).toList(),
               );
+
+              WidgetsBinding.instance.addPostFrameCallback((_) {
+                if (!context.mounted) return;
+                _processAlertNotifications(
+                  selectedDevice.id,
+                  selectedDevice.label,
+                  readings,
+                );
+              });
 
               return ListView(
                 padding: EdgeInsets.all(spacing),
@@ -352,6 +513,11 @@ class _DashboardScreenState extends State<DashboardScreen> {
                   ),
                   const SizedBox(height: 14),
                   StatusBadge(status: status),
+                  const SizedBox(height: 14),
+                  _LiveThresholdAlerts(
+                    deviceLabel: selectedDevice.label,
+                    readings: readings,
+                  ),
                   const SizedBox(height: 14),
                   _MetricsGrid(reading: latest, spacing: spacing),
                   const SizedBox(height: 14),
@@ -372,7 +538,7 @@ class _DashboardScreenState extends State<DashboardScreen> {
                   ),
                   const SizedBox(height: 8),
                   Text(
-                    'Last update: ${DateFormat('dd MMM yyyy, HH:mm:ss').format(latest.timestamp)}',
+                    'Charts use the loaded window; values in cards are the newest cloud point above.',
                     style: Theme.of(context).textTheme.bodySmall,
                   ),
                 ],
@@ -496,56 +662,85 @@ class _MetricsGrid extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    return LayoutBuilder(
-      builder: (context, constraints) {
-        final twoColumns = constraints.maxWidth > 620;
-        final cards = [
-          MetricCard(
-            label: 'Humidity',
-            value: '${reading.humidity.toStringAsFixed(0)} %',
-            icon: Icons.water_drop_rounded,
-            accent: const Color(0xFF18B8C8),
-          ),
-          MetricCard(
-            label: 'Vibration',
-            value: '${reading.vibration.toStringAsFixed(2)} mm/s',
-            icon: Icons.graphic_eq_rounded,
-            accent: const Color(0xFFEAB308),
-          ),
-          MetricCard(
-            label: 'Temperature',
-            value: '${reading.temperature.toStringAsFixed(1)} °C',
-            icon: Icons.thermostat_rounded,
-            accent: const Color(0xFF3B82F6),
-          ),
-        ];
+    final scheme = Theme.of(context).colorScheme;
+    final muted = scheme.onSurface.withValues(alpha: 0.72);
 
-        if (!twoColumns) {
-          return Column(
-            children: cards
-                .map(
-                  (card) => Padding(
-                    padding: EdgeInsets.only(bottom: spacing),
-                    child: card,
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        Row(
+          crossAxisAlignment: CrossAxisAlignment.end,
+          children: [
+            Expanded(
+              child: Text(
+                'Latest cloud sample',
+                style: Theme.of(context).textTheme.titleSmall?.copyWith(
+                      fontWeight: FontWeight.w700,
+                    ),
+              ),
+            ),
+            Text(
+              DateFormat('yyyy-MM-dd HH:mm:ss').format(reading.timestamp),
+              style: Theme.of(context).textTheme.bodySmall?.copyWith(
+                    color: muted,
+                    fontFeatures: const [FontFeature.tabularFigures()],
                   ),
-                )
-                .toList(),
-          );
-        }
+            ),
+          ],
+        ),
+        const SizedBox(height: 10),
+        LayoutBuilder(
+          builder: (context, constraints) {
+            final twoColumns = constraints.maxWidth > 620;
+            final cards = [
+              MetricCard(
+                label: 'Humidity',
+                value: '${reading.humidity.toStringAsFixed(0)} %',
+                icon: Icons.water_drop_rounded,
+                accent: const Color(0xFF18B8C8),
+              ),
+              MetricCard(
+                label: 'Vibration',
+                value: '${reading.vibration.toStringAsFixed(2)} mm/s',
+                icon: Icons.graphic_eq_rounded,
+                accent: const Color(0xFFEAB308),
+              ),
+              MetricCard(
+                label: 'Temperature',
+                value: '${reading.temperature.toStringAsFixed(1)} °C',
+                icon: Icons.thermostat_rounded,
+                accent: const Color(0xFF3B82F6),
+              ),
+            ];
 
-        return Wrap(
-          spacing: spacing,
-          runSpacing: spacing,
-          children: cards
-              .map(
-                (card) => SizedBox(
-                  width: (constraints.maxWidth - spacing) / 2,
-                  child: card,
-                ),
-              )
-              .toList(),
-        );
-      },
+            if (!twoColumns) {
+              return Column(
+                children: cards
+                    .map(
+                      (card) => Padding(
+                        padding: EdgeInsets.only(bottom: spacing),
+                        child: card,
+                      ),
+                    )
+                    .toList(),
+              );
+            }
+
+            return Wrap(
+              spacing: spacing,
+              runSpacing: spacing,
+              children: cards
+                  .map(
+                    (card) => SizedBox(
+                      width: (constraints.maxWidth - spacing) / 2,
+                      child: card,
+                    ),
+                  )
+                  .toList(),
+            );
+          },
+        ),
+      ],
     );
   }
 }
@@ -667,7 +862,9 @@ class _ChartCard extends StatelessWidget {
                   lineBarsData: [
                     LineChartBarData(
                       spots: spots,
-                      isCurved: true,
+                      // Straight segments: curved splines can overshoot and show
+                      // fake peaks (e.g. near 1.0) while every sample is 0.
+                      isCurved: false,
                       color: color,
                       barWidth: 2.4,
                       belowBarData: BarAreaData(
@@ -850,62 +1047,262 @@ class AlertEntry {
   final String message;
 }
 
-class AlertsScreen extends StatelessWidget {
-  const AlertsScreen({super.key});
+/// Alerts use the **loaded chart window** (not only the latest point), so past
+/// spikes still show after the current sample returns to zero.
+List<AlertEntry> liveAlertsFromReadings(
+  String deviceLabel,
+  List<SensorReading> readings,
+) {
+  if (readings.isEmpty) return const [];
 
-  List<AlertEntry> get alerts => [
-        AlertEntry(
-          title: 'Temperature threshold exceeded',
-          deviceId: 'PR-082',
-          timestamp: DateTime.now().subtract(const Duration(minutes: 7)),
-          status: HealthStatus.fault,
-          message: 'Temperature reached 89.2°C and required immediate shutdown.',
-        ),
-        AlertEntry(
-          title: 'Vibration near critical band',
-          deviceId: 'MX-201',
-          timestamp: DateTime.now().subtract(const Duration(minutes: 34)),
-          status: HealthStatus.warning,
-          message: 'Sustained vibration around 2.8 mm/s over 5-minute window.',
-        ),
-        AlertEntry(
-          title: 'Maintenance reminder',
-          deviceId: 'CN-310',
-          timestamp: DateTime.now().subtract(const Duration(hours: 2)),
-          status: HealthStatus.normal,
-          message: 'Scheduled bearing inspection window starts in 4 hours.',
-        ),
-      ];
+  final latest = newestReading(readings);
+  final out = <AlertEntry>[];
+
+  final peakVib = readings.reduce(
+    (a, b) => a.vibration >= b.vibration ? a : b,
+  );
+  if (readings.any((r) => vibrationAlertActive(r.vibration))) {
+    SensorReading? lastHitFromNewest;
+    var kFromLatest = 0;
+    for (var i = readings.length - 1; i >= 0; i--) {
+      if (vibrationAlertActive(readings[i].vibration)) {
+        lastHitFromNewest = readings[i];
+        kFromLatest = readings.length - i;
+        break;
+      }
+    }
+    final secPerPoint = _estimatedSecondsPerDataPoint(readings);
+    final estSecondsAgo = kFromLatest * secPerPoint;
+    final vibMsg = lastHitFromNewest != null
+        ? '${lastHitFromNewest.vibration.toStringAsFixed(2)} mm/s — '
+            '${_ordinalFromLatest(kFromLatest)} : '
+            '${_formatRoughAgo(estSecondsAgo)} '
+            '(≈${secPerPoint.toStringAsFixed(1)}s per point). '
+            'Current ${latest.vibration.toStringAsFixed(2)} mm/s. '
+            'Peak in window ${peakVib.vibration.toStringAsFixed(2)} mm/s.'
+        : 'Alert when any sample > 0.';
+
+    out.add(
+      AlertEntry(
+        title: 'Vibration alert',
+        deviceId: deviceLabel,
+        timestamp: lastHitFromNewest?.timestamp ?? peakVib.timestamp,
+        status: HealthStatus.warning,
+        message: vibMsg,
+      ),
+    );
+  }
+
+  final peakTemp = readings.reduce(
+    (a, b) => a.temperature >= b.temperature ? a : b,
+  );
+  if (readings.any((r) => temperatureAlertActive(r.temperature))) {
+    SensorReading? lastTempHitFromNewest;
+    var kTempFromLatest = 0;
+    for (var i = readings.length - 1; i >= 0; i--) {
+      if (temperatureAlertActive(readings[i].temperature)) {
+        lastTempHitFromNewest = readings[i];
+        kTempFromLatest = readings.length - i;
+        break;
+      }
+    }
+    final secPerPointTemp = _estimatedSecondsPerDataPoint(readings);
+    final estTempSecondsAgo = kTempFromLatest * secPerPointTemp;
+    final tempMsg = lastTempHitFromNewest != null
+        ? '${lastTempHitFromNewest.temperature.toStringAsFixed(1)} °C — '
+            '${_ordinalFromLatest(kTempFromLatest)} : '
+            '${_formatRoughAgo(estTempSecondsAgo)} '
+            '(≈${secPerPointTemp.toStringAsFixed(1)}s per point). '
+            'Current ${latest.temperature.toStringAsFixed(1)} °C. '
+            'Peak in window ${peakTemp.temperature.toStringAsFixed(1)} °C.'
+        : 'Alert when any sample ≥ 25 °C.';
+
+    out.add(
+      AlertEntry(
+        title: 'Temperature alert',
+        deviceId: deviceLabel,
+        timestamp: lastTempHitFromNewest?.timestamp ?? peakTemp.timestamp,
+        status: HealthStatus.warning,
+        message: tempMsg,
+      ),
+    );
+  }
+
+  return out;
+}
+
+class _LiveThresholdAlerts extends StatelessWidget {
+  const _LiveThresholdAlerts({
+    required this.deviceLabel,
+    required this.readings,
+  });
+
+  final String deviceLabel;
+  final List<SensorReading> readings;
 
   @override
   Widget build(BuildContext context) {
-    final now = DateTime.now();
-    final todayAlerts = alerts
-        .where((a) => a.timestamp.day == now.day)
-        .toList(growable: false);
-    final previousAlerts = alerts
-        .where((a) => a.timestamp.day != now.day)
-        .toList(growable: false);
+    final entries = liveAlertsFromReadings(deviceLabel, readings);
+    if (entries.isEmpty) {
+      return const SizedBox.shrink();
+    }
 
-    return SafeArea(
-      child: ListView(
-        padding: const EdgeInsets.all(16),
-        children: [
-          const _Header(
-            title: 'Alerts & Fault History',
-            subtitle: 'Track machine events by severity',
+    final scheme = Theme.of(context).colorScheme;
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        Text(
+          'Active alerts',
+          style: Theme.of(context).textTheme.titleSmall?.copyWith(
+                fontWeight: FontWeight.w700,
+                color: scheme.error,
+              ),
+        ),
+        const SizedBox(height: 8),
+        ...entries.map(
+          (e) => Padding(
+            padding: const EdgeInsets.only(bottom: 8),
+            child: Material(
+              color: scheme.errorContainer.withValues(alpha: 0.35),
+              borderRadius: BorderRadius.circular(12),
+              child: Padding(
+                padding: const EdgeInsets.all(12),
+                child: Row(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Icon(Icons.notifications_active_rounded, color: scheme.error),
+                    const SizedBox(width: 10),
+                    Expanded(
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          Text(
+                            e.title,
+                            style: const TextStyle(fontWeight: FontWeight.w700),
+                          ),
+                          const SizedBox(height: 4),
+                          Text(
+                            e.message,
+                            style: Theme.of(context).textTheme.bodySmall,
+                          ),
+                        ],
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+            ),
           ),
-          const SizedBox(height: 16),
-          if (alerts.isEmpty) const _EmptyAlertsState(),
-          if (todayAlerts.isNotEmpty) ...[
-            _AlertGroup(title: 'Today', entries: todayAlerts),
-            const SizedBox(height: 14),
-          ],
-          if (previousAlerts.isNotEmpty) ...[
-            _AlertGroup(title: 'Previous', entries: previousAlerts),
-          ],
-        ],
+        ),
+      ],
+    );
+  }
+}
+
+class AlertsScreen extends StatelessWidget {
+  const AlertsScreen({super.key});
+
+  @override
+  Widget build(BuildContext context) {
+    return SafeArea(
+      child: StreamBuilder<List<Device>>(
+        stream: devicesStream(),
+        builder: (context, deviceSnapshot) {
+          if (deviceSnapshot.connectionState == ConnectionState.waiting) {
+            return const Center(child: CircularProgressIndicator());
+          }
+          if (deviceSnapshot.hasError) {
+            return Center(
+              child: Padding(
+                padding: const EdgeInsets.all(24),
+                child: Text('Unable to load devices.\n${deviceSnapshot.error}'),
+              ),
+            );
+          }
+
+          final devices = deviceSnapshot.data ?? const <Device>[];
+          if (devices.isEmpty) {
+            return ListView(
+              padding: const EdgeInsets.all(16),
+              children: const [
+                _Header(
+                  title: 'Alerts & Fault History',
+                  subtitle: 'Live rules from Firestore',
+                ),
+                SizedBox(height: 16),
+                _EmptyAlertsState(),
+              ],
+            );
+          }
+
+          return ListView(
+            padding: const EdgeInsets.all(16),
+            children: [
+              const _Header(
+                title: 'Alerts & Fault History',
+                subtitle:
+                    'Chart window: any sample with vibration > 0 or temperature ≥ 25 °C',
+              ),
+              const SizedBox(height: 16),
+              ...devices.map(
+                (d) => _DeviceLiveAlertsSection(device: d),
+              ),
+              Padding(
+                padding: const EdgeInsets.only(top: 8),
+                child: Text(
+                  'If nothing appears above, no sample in the loaded window exceeded the thresholds.',
+                  style: Theme.of(context).textTheme.bodySmall,
+                ),
+              ),
+            ],
+          );
+        },
       ),
+    );
+  }
+}
+
+class _DeviceLiveAlertsSection extends StatelessWidget {
+  const _DeviceLiveAlertsSection({required this.device});
+
+  final Device device;
+
+  @override
+  Widget build(BuildContext context) {
+    return StreamBuilder<List<SensorReading>>(
+      stream: sensorReadingsStream(device.id),
+      builder: (context, readingSnapshot) {
+        if (readingSnapshot.connectionState == ConnectionState.waiting) {
+          return const Padding(
+            padding: EdgeInsets.only(bottom: 16),
+            child: LinearProgressIndicator(minHeight: 2),
+          );
+        }
+        if (readingSnapshot.hasError) {
+          return Padding(
+            padding: const EdgeInsets.only(bottom: 16),
+            child: Text(
+              '${device.label}: ${readingSnapshot.error}',
+              style: TextStyle(color: Theme.of(context).colorScheme.error),
+            ),
+          );
+        }
+
+        final readings = readingSnapshot.data ?? const <SensorReading>[];
+        if (readings.isEmpty) {
+          return const SizedBox.shrink();
+        }
+
+        final entries = liveAlertsFromReadings(device.label, readings);
+        if (entries.isEmpty) {
+          return const SizedBox.shrink();
+        }
+
+        return Padding(
+          padding: const EdgeInsets.only(bottom: 14),
+          child: _AlertGroup(title: 'Live • ${device.label}', entries: entries),
+        );
+      },
     );
   }
 }
