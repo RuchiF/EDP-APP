@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:math' as math;
 
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:firebase_core/firebase_core.dart';
@@ -153,16 +154,54 @@ class Device {
 
 class SensorReading {
   const SensorReading({
+    required this.id,
     required this.temperature,
-    required this.humidity,
-    required this.vibration,
+    required this.accelX,
+    required this.accelY,
+    required this.accelZ,
+    required this.bpfiEnergy,
+    required this.bpfoEnergy,
+    required this.bsfEnergy,
+    required this.ftfEnergy,
+    required this.faultScore,
+    required this.warnThreshold,
+    required this.faultThreshold,
+    required this.calibrated,
+    required this.tempAlert,
+    required this.vibrationAlert,
+    required this.rawStatus,
     required this.timestamp,
   });
 
+  final String id;
   final double temperature;
-  final double humidity;
-  final double vibration;
+  final double accelX;
+  final double accelY;
+  final double accelZ;
+  final double bpfiEnergy;
+  final double bpfoEnergy;
+  final double bsfEnergy;
+  final double ftfEnergy;
+  final double faultScore;
+  final double warnThreshold;
+  final double faultThreshold;
+  final bool calibrated;
+  final bool tempAlert;
+  final bool vibrationAlert;
+  final String rawStatus;
   final DateTime timestamp;
+
+  double get accelMagnitude =>
+      math.sqrt(accelX * accelX + accelY * accelY + accelZ * accelZ);
+
+  HealthStatus get status {
+    final normalized = rawStatus.toUpperCase();
+    if (normalized == 'FAULT') return HealthStatus.fault;
+    if (normalized == 'WARNING') return HealthStatus.warning;
+    if (faultScore >= faultThreshold) return HealthStatus.fault;
+    if (faultScore >= warnThreshold) return HealthStatus.warning;
+    return HealthStatus.normal;
+  }
 }
 
 /// Newest point by [SensorReading.timestamp] (cloud time), not Firestore doc order.
@@ -171,53 +210,6 @@ SensorReading newestReading(List<SensorReading> readings) {
   final sorted = List<SensorReading>.from(readings)
     ..sort((a, b) => a.timestamp.compareTo(b.timestamp));
   return sorted.last;
-}
-
-/// Live alert rules (adjust thresholds here).
-bool vibrationAlertActive(double vibrationMmS) => vibrationMmS > 0;
-
-bool temperatureAlertActive(double tempC) => tempC >= 25.0;
-
-/// Default gap between points if timestamps are missing or irregular.
-const double _kDefaultSecondsPerDataPoint = 2.0;
-
-double _estimatedSecondsPerDataPoint(List<SensorReading> readings) {
-  if (readings.length < 2) return _kDefaultSecondsPerDataPoint;
-  final deltas = <double>[];
-  for (var i = 1; i < readings.length; i++) {
-    final sec = readings[i]
-        .timestamp
-        .difference(readings[i - 1].timestamp)
-        .inSeconds
-        .abs()
-        .toDouble();
-    if (sec > 0) deltas.add(sec);
-  }
-  if (deltas.isEmpty) return _kDefaultSecondsPerDataPoint;
-  final mean = deltas.reduce((a, b) => a + b) / deltas.length;
-  if (mean < 0.5 || mean > 86400) return _kDefaultSecondsPerDataPoint;
-  return mean;
-}
-
-/// 1 = newest sample, 3 = third-from-newest, etc.
-String _ordinalFromLatest(int k) {
-  return k == 1 ? '1 data point from latest' : '$k data points from latest';
-}
-
-String _formatRoughAgo(double seconds) {
-  if (seconds < 55) {
-    return '~${seconds.round()}s ago';
-  }
-  if (seconds < 3540) {
-    final m = (seconds / 60).round();
-    return '~${m}m ago';
-  }
-  if (seconds < 86400) {
-    final h = (seconds / 3600).round();
-    return '~${h}h ago';
-  }
-  final d = (seconds / 86400).round();
-  return '~${d}d ago';
 }
 
 Stream<List<Device>> devicesStream() => FirebaseFirestore.instance
@@ -245,7 +237,7 @@ Stream<List<SensorReading>> sensorReadingsStream(String deviceId) =>
         .snapshots()
         .map((snapshot) {
       final readings = snapshot.docs
-          .map((doc) => readingFromMap(doc.data()))
+          .map((doc) => readingFromMap(doc.id, doc.data()))
           .whereType<SensorReading>()
           .toList();
       readings.sort((a, b) => a.timestamp.compareTo(b.timestamp));
@@ -258,8 +250,9 @@ Stream<List<SensorReading>> sensorReadingsStream(String deviceId) =>
         final r = readings[i];
         debugPrint(
           '  [$i] temp=${r.temperature.toStringAsFixed(2)} '
-          'hum=${r.humidity.toStringAsFixed(1)} '
-          'vib=${r.vibration.toStringAsFixed(3)} '
+          'ax=${r.accelX.toStringAsFixed(3)} ay=${r.accelY.toStringAsFixed(3)} '
+          'az=${r.accelZ.toStringAsFixed(3)} '
+          'faultScore=${r.faultScore.toStringAsFixed(3)} '
           'ts=${r.timestamp.toIso8601String()}',
         );
       }
@@ -268,8 +261,8 @@ Stream<List<SensorReading>> sensorReadingsStream(String deviceId) =>
         debugPrint(
           '[Firestore] devices/$deviceId newest (by timestamp) → '
           'temp=${newest.temperature.toStringAsFixed(2)} '
-          'hum=${newest.humidity.toStringAsFixed(1)} '
-          'vib=${newest.vibration.toStringAsFixed(3)} '
+          'ax=${newest.accelX.toStringAsFixed(3)} ay=${newest.accelY.toStringAsFixed(3)} az=${newest.accelZ.toStringAsFixed(3)} '
+          'faultScore=${newest.faultScore.toStringAsFixed(3)} '
           'ts=${newest.timestamp.toIso8601String()}',
         );
       }
@@ -277,42 +270,80 @@ Stream<List<SensorReading>> sensorReadingsStream(String deviceId) =>
       return readings;
     });
 
-SensorReading? readingFromMap(Map<String, dynamic> data) {
+DateTime? _timestampFromDynamic(dynamic timestampValue) {
+  if (timestampValue is Timestamp) return timestampValue.toDate();
+  if (timestampValue is DateTime) return timestampValue;
+  if (timestampValue is num) {
+    final value = timestampValue.toDouble();
+    if (value > 1000000000000) {
+      return DateTime.fromMillisecondsSinceEpoch(value.toInt());
+    }
+    return DateTime.fromMillisecondsSinceEpoch((value * 1000).toInt());
+  }
+  if (timestampValue is String) {
+    final asNum = num.tryParse(timestampValue);
+    if (asNum != null) return _timestampFromDynamic(asNum);
+    final asDate = DateTime.tryParse(timestampValue);
+    if (asDate != null) return asDate;
+  }
+  return null;
+}
+
+SensorReading? readingFromMap(String id, Map<String, dynamic> data) {
   final tempValue = data['temperature'];
-  final humidityValue = data['humidity'];
-  final vibrationValue = data['vibration'];
+  final accelXValue = data['accel_x'];
+  final accelYValue = data['accel_y'];
+  final accelZValue = data['accel_z'];
+  final bpfiEnergyValue = data['bpfi_energy'];
+  final bpfoEnergyValue = data['bpfo_energy'];
+  final bsfEnergyValue = data['bsf_energy'];
+  final ftfEnergyValue = data['ftf_energy'] ?? data['fft_energy'];
+  final faultScoreValue = data['fault_score'];
+  final warnThresholdValue = data['warn_threshold'];
+  final faultThresholdValue = data['fault_threshold'];
+  final calibratedValue = data['calibrated'];
+  final tempAlertValue = data['temp_alert'];
+  final vibrationAlertValue = data['vibration'];
+  final statusValue = data['status'];
   final timestampValue = data['timestamp'] ?? data['timesp'] ?? data['time'];
 
-  if (tempValue == null || vibrationValue == null || timestampValue == null) {
+  if (tempValue == null ||
+      accelXValue == null ||
+      accelYValue == null ||
+      accelZValue == null ||
+      timestampValue == null) {
     return null;
   }
 
   final temperature = sensorToDouble(tempValue);
-  final humidity = sensorToDouble(humidityValue) ?? 0.0;
-  final vibration = sensorToDouble(vibrationValue);
-  if (temperature == null || vibration == null) {
+  final accelX = sensorToDouble(accelXValue);
+  final accelY = sensorToDouble(accelYValue);
+  final accelZ = sensorToDouble(accelZValue);
+  if (temperature == null || accelX == null || accelY == null || accelZ == null) {
     return null;
   }
-
-  DateTime timestamp;
-  if (timestampValue is Timestamp) {
-    timestamp = timestampValue.toDate();
-  } else if (timestampValue is num) {
-    timestamp = DateTime.fromMillisecondsSinceEpoch(
-      (timestampValue * 1000).toInt(),
-    );
-  } else if (timestampValue is String) {
-    final parsed = num.tryParse(timestampValue);
-    if (parsed == null) return null;
-    timestamp = DateTime.fromMillisecondsSinceEpoch((parsed * 1000).toInt());
-  } else {
+  final timestamp = _timestampFromDynamic(timestampValue);
+  if (timestamp == null) {
     return null;
   }
 
   return SensorReading(
+    id: id,
     temperature: temperature,
-    humidity: humidity,
-    vibration: vibration,
+    accelX: accelX,
+    accelY: accelY,
+    accelZ: accelZ,
+    bpfiEnergy: sensorToDouble(bpfiEnergyValue) ?? 0,
+    bpfoEnergy: sensorToDouble(bpfoEnergyValue) ?? 0,
+    bsfEnergy: sensorToDouble(bsfEnergyValue) ?? 0,
+    ftfEnergy: sensorToDouble(ftfEnergyValue) ?? 0,
+    faultScore: sensorToDouble(faultScoreValue) ?? 0,
+    warnThreshold: sensorToDouble(warnThresholdValue) ?? 0.98,
+    faultThreshold: sensorToDouble(faultThresholdValue) ?? 1.24,
+    calibrated: sensorToBool(calibratedValue),
+    tempAlert: sensorToBool(tempAlertValue),
+    vibrationAlert: sensorToBool(vibrationAlertValue),
+    rawStatus: (statusValue ?? 'NORMAL').toString(),
     timestamp: timestamp,
   );
 }
@@ -322,6 +353,16 @@ double? sensorToDouble(dynamic value) {
   if (value is bool) return value ? 1.0 : 0.0;
   if (value is String) return double.tryParse(value);
   return null;
+}
+
+bool sensorToBool(dynamic value) {
+  if (value is bool) return value;
+  if (value is num) return value != 0;
+  if (value is String) {
+    final normalized = value.toLowerCase();
+    return normalized == 'true' || normalized == '1' || normalized == 'yes';
+  }
+  return false;
 }
 
 class DashboardScreen extends StatefulWidget {
@@ -334,76 +375,39 @@ class DashboardScreen extends StatefulWidget {
 class _DashboardScreenState extends State<DashboardScreen> {
   String? _selectedDeviceId;
   String? _alertTrackingDeviceId;
-  bool _prevHadVibrationAlert = false;
-  bool _prevHadTemperatureAlert = false;
+  DateTime? _lastNotifiedTimestamp;
 
-  void _processAlertNotifications(
-    String deviceId,
-    String deviceLabel,
-    List<SensorReading> readings,
-  ) {
+  void _processAlertNotifications(String deviceId, String deviceLabel, SensorReading latest) {
     if (!mounted) return;
     if (_alertTrackingDeviceId != deviceId) {
       _alertTrackingDeviceId = deviceId;
-      _prevHadVibrationAlert = false;
-      _prevHadTemperatureAlert = false;
+      _lastNotifiedTimestamp = null;
     }
+    if (_lastNotifiedTimestamp == latest.timestamp) return;
+    _lastNotifiedTimestamp = latest.timestamp;
 
-    final entries = liveAlertsFromReadings(deviceLabel, readings);
-    final hasVib = entries.any((e) => e.title == 'Vibration alert');
-    final hasTemp = entries.any((e) => e.title == 'Temperature alert');
-
-    if (hasVib && !_prevHadVibrationAlert) {
-      final msg =
-          entries.firstWhere((e) => e.title == 'Vibration alert').message;
-      unawaited(AlertNotificationService.showVibrationAlert(deviceLabel, msg));
-      appScaffoldMessengerKey.currentState?.showSnackBar(
-        SnackBar(
-          behavior: SnackBarBehavior.floating,
-          content: Text('Vibration alert — $deviceLabel'),
-          duration: const Duration(seconds: 6),
+    if (latest.status == HealthStatus.fault) {
+      unawaited(
+        AlertNotificationService.showVibrationAlert(
+          deviceLabel,
+          'Fault status detected. Score ${latest.faultScore.toStringAsFixed(3)} '
+          '(threshold ${latest.faultThreshold.toStringAsFixed(3)}).',
+        ),
+      );
+    } else if (latest.tempAlert || latest.vibrationAlert) {
+      unawaited(
+        AlertNotificationService.showTemperatureAlert(
+          deviceLabel,
+          'Warning indicators raised (temperature/vibration). '
+          'Score ${latest.faultScore.toStringAsFixed(3)}.',
         ),
       );
     }
-
-    if (hasTemp && !_prevHadTemperatureAlert) {
-      final msg =
-          entries.firstWhere((e) => e.title == 'Temperature alert').message;
-      unawaited(AlertNotificationService.showTemperatureAlert(deviceLabel, msg));
-      appScaffoldMessengerKey.currentState?.showSnackBar(
-        SnackBar(
-          behavior: SnackBarBehavior.floating,
-          content: Text('Temperature alert — $deviceLabel'),
-          duration: const Duration(seconds: 6),
-        ),
-      );
-    }
-
-    _prevHadVibrationAlert = hasVib;
-    _prevHadTemperatureAlert = hasTemp;
-  }
-
-  HealthStatus _statusFromReadings(double vibration, double temp) {
-    if (vibration > 3.5 || temp > 85) return HealthStatus.fault;
-    if (vibration > 2.5 || temp > 70) return HealthStatus.warning;
-    return HealthStatus.normal;
-  }
-
-  /// Uses peak vibration/temperature in the loaded window so status matches the chart.
-  HealthStatus _statusFromReadingsList(List<SensorReading> readings) {
-    if (readings.isEmpty) return HealthStatus.normal;
-    final maxVibration = readings
-        .map((r) => r.vibration)
-        .reduce((a, b) => a > b ? a : b);
-    final maxTemp = readings
-        .map((r) => r.temperature)
-        .reduce((a, b) => a > b ? a : b);
-    return _statusFromReadings(maxVibration, maxTemp);
   }
 
   @override
   Widget build(BuildContext context) {
-    final spacing = MediaQuery.sizeOf(context).width > 700 ? 20.0 : 14.0;
+    final spacing = MediaQuery.sizeOf(context).width > 700 ? 24.0 : 18.0;
 
     return SafeArea(
       child: StreamBuilder<List<Device>>(
@@ -480,21 +484,46 @@ class _DashboardScreenState extends State<DashboardScreen> {
               }
 
               final latest = newestReading(readings);
-              final status = _statusFromReadingsList(readings);
-              final vibrationSpots = _toSpots(
-                readings.map((r) => r.vibration).toList(),
+              final status = latest.status;
+              final accelXSpots = _toSpots(readings.map((r) => r.accelX).toList());
+              final accelYSpots = _toSpots(readings.map((r) => r.accelY).toList());
+              final accelZSpots = _toSpots(readings.map((r) => r.accelZ).toList());
+              final bpfiSpots = _toSpots(readings.map((r) => r.bpfiEnergy).toList());
+              final bpfoSpots = _toSpots(readings.map((r) => r.bpfoEnergy).toList());
+              final bsfSpots = _toSpots(readings.map((r) => r.bsfEnergy).toList());
+              final ftfSpots = _toSpots(readings.map((r) => r.ftfEnergy).toList());
+              final scoreSpots = _toSpots(readings.map((r) => r.faultScore).toList());
+              final labels = _timeLabels(readings);
+              final vibrationRange = _axisRange(
+                [
+                  ...readings.map((r) => r.accelX),
+                  ...readings.map((r) => r.accelY),
+                  ...readings.map((r) => r.accelZ),
+                ],
+                minSpan: 0.5,
               );
-              final temperatureSpots = _toSpots(
-                readings.map((r) => r.temperature).toList(),
+              final energyRange = _axisRange(
+                [
+                  ...readings.map((r) => r.bpfiEnergy),
+                  ...readings.map((r) => r.bpfoEnergy),
+                  ...readings.map((r) => r.bsfEnergy),
+                  ...readings.map((r) => r.ftfEnergy),
+                ],
+                minSpan: 0.2,
+              );
+              final faultRange = _axisRange(
+                [
+                  ...readings.map((r) => r.faultScore),
+                  latest.warnThreshold,
+                  latest.faultThreshold,
+                ],
+                minFloor: 0,
+                minSpan: 0.5,
               );
 
               WidgetsBinding.instance.addPostFrameCallback((_) {
                 if (!context.mounted) return;
-                _processAlertNotifications(
-                  selectedDevice.id,
-                  selectedDevice.label,
-                  readings,
-                );
+                _processAlertNotifications(selectedDevice.id, selectedDevice.label, latest);
               });
 
               return ListView(
@@ -513,33 +542,27 @@ class _DashboardScreenState extends State<DashboardScreen> {
                   ),
                   const SizedBox(height: 14),
                   StatusBadge(status: status),
-                  const SizedBox(height: 14),
-                  _LiveThresholdAlerts(
-                    deviceLabel: selectedDevice.label,
-                    readings: readings,
-                  ),
-                  const SizedBox(height: 14),
+                  const SizedBox(height: 18),
                   _MetricsGrid(reading: latest, spacing: spacing),
-                  const SizedBox(height: 14),
-                  _ChartCard(
-                    title: 'Vibration Trend (mm/s)',
-                    color: const Color(0xFF18B8C8),
-                    spots: vibrationSpots,
-                    minY: 0,
-                    maxY: 5,
-                  ),
-                  const SizedBox(height: 14),
-                  _ChartCard(
-                    title: 'Temperature Trend (°C)',
-                    color: const Color(0xFF3B82F6),
-                    spots: temperatureSpots,
-                    minY: 0,
-                    maxY: 120,
-                  ),
-                  const SizedBox(height: 8),
-                  Text(
-                    'Charts use the loaded window; values in cards are the newest cloud point above.',
-                    style: Theme.of(context).textTheme.bodySmall,
+                  const SizedBox(height: 18),
+                  _DashboardAnalyticsTabs(
+                    deviceLabel: selectedDevice.label,
+                    latest: latest,
+                    readings: readings,
+                    labels: labels,
+                    vibrationRange: vibrationRange,
+                    energyRange: energyRange,
+                    faultRange: faultRange,
+                    accelXSpots: accelXSpots,
+                    accelYSpots: accelYSpots,
+                    accelZSpots: accelZSpots,
+                    bpfiSpots: bpfiSpots,
+                    bpfoSpots: bpfoSpots,
+                    bsfSpots: bsfSpots,
+                    ftfSpots: ftfSpots,
+                    scoreSpots: scoreSpots,
+                    warnLine: _constantLine(latest.warnThreshold, readings.length),
+                    faultLine: _constantLine(latest.faultThreshold, readings.length),
                   ),
                 ],
               );
@@ -556,6 +579,39 @@ class _DashboardScreenState extends State<DashboardScreen> {
         .entries
         .map((entry) => FlSpot(entry.key.toDouble(), entry.value))
         .toList(growable: false);
+  }
+
+  List<FlSpot> _constantLine(double value, int count) {
+    return List<FlSpot>.generate(
+      count,
+      (idx) => FlSpot(idx.toDouble(), value),
+      growable: false,
+    );
+  }
+
+  List<String> _timeLabels(List<SensorReading> readings) {
+    return readings
+        .map((r) => DateFormat('HH:mm:ss').format(r.timestamp))
+        .toList(growable: false);
+  }
+
+  _AxisRange _axisRange(
+    Iterable<double> values, {
+    double? minFloor,
+    double minSpan = 1,
+  }) {
+    final list = values.toList(growable: false);
+    if (list.isEmpty) return const _AxisRange(min: 0, max: 1);
+    var min = list.reduce(math.min);
+    var max = list.reduce(math.max);
+    if (minFloor != null && min > minFloor) min = minFloor;
+    if ((max - min).abs() < minSpan) {
+      final center = (max + min) / 2;
+      min = center - (minSpan / 2);
+      max = center + (minSpan / 2);
+    }
+    final padding = (max - min) * 0.12;
+    return _AxisRange(min: min - padding, max: max + padding);
   }
 }
 
@@ -694,22 +750,22 @@ class _MetricsGrid extends StatelessWidget {
             final twoColumns = constraints.maxWidth > 620;
             final cards = [
               MetricCard(
-                label: 'Humidity',
-                value: '${reading.humidity.toStringAsFixed(0)} %',
-                icon: Icons.water_drop_rounded,
-                accent: const Color(0xFF18B8C8),
-              ),
-              MetricCard(
-                label: 'Vibration',
-                value: '${reading.vibration.toStringAsFixed(2)} mm/s',
-                icon: Icons.graphic_eq_rounded,
-                accent: const Color(0xFFEAB308),
-              ),
-              MetricCard(
                 label: 'Temperature',
-                value: '${reading.temperature.toStringAsFixed(1)} °C',
+                value: '${reading.temperature.toStringAsFixed(2)} °C',
                 icon: Icons.thermostat_rounded,
                 accent: const Color(0xFF3B82F6),
+              ),
+              MetricCard(
+                label: 'Fault score',
+                value: reading.faultScore.toStringAsFixed(4),
+                icon: Icons.graphic_eq_rounded,
+                accent: const Color(0xFFEF4444),
+              ),
+              MetricCard(
+                label: 'Accel magnitude',
+                value: '${reading.accelMagnitude.toStringAsFixed(3)} g',
+                icon: Icons.vibration_rounded,
+                accent: const Color(0xFF18B8C8),
               ),
             ];
 
@@ -798,20 +854,291 @@ class MetricCard extends StatelessWidget {
   }
 }
 
-class _ChartCard extends StatelessWidget {
-  const _ChartCard({
-    required this.title,
+class _LineSeries {
+  const _LineSeries({
+    required this.name,
     required this.color,
     required this.spots,
-    required this.minY,
-    required this.maxY,
+  });
+
+  final String name;
+  final Color color;
+  final List<FlSpot> spots;
+}
+
+class _AxisRange {
+  const _AxisRange({required this.min, required this.max});
+
+  final double min;
+  final double max;
+}
+
+class _MultiLineChartCard extends StatelessWidget {
+  const _MultiLineChartCard({
+    required this.title,
+    required this.series,
+    required this.labels,
+    this.minY,
+    this.maxY,
   });
 
   final String title;
-  final Color color;
-  final List<FlSpot> spots;
-  final double minY;
-  final double maxY;
+  final List<_LineSeries> series;
+  final List<String> labels;
+  final double? minY;
+  final double? maxY;
+
+  @override
+  Widget build(BuildContext context) {
+    final maxX = labels.isEmpty ? 0.0 : (labels.length - 1).toDouble();
+    return Card(
+      child: Padding(
+        padding: const EdgeInsets.all(14),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Text(
+              title,
+              style: Theme.of(context).textTheme.titleMedium?.copyWith(fontWeight: FontWeight.w700),
+            ),
+            const SizedBox(height: 12),
+            Wrap(
+              spacing: 8,
+              runSpacing: 6,
+              children: series
+                  .map((s) => Row(
+                        mainAxisSize: MainAxisSize.min,
+                        children: [
+                          Container(width: 10, height: 10, decoration: BoxDecoration(color: s.color, shape: BoxShape.circle)),
+                          const SizedBox(width: 6),
+                          Text(s.name, style: Theme.of(context).textTheme.bodySmall),
+                        ],
+                      ))
+                  .toList(),
+            ),
+            const SizedBox(height: 14),
+            SizedBox(
+              height: 280,
+              child: LineChart(
+                LineChartData(
+                  minY: minY,
+                  maxY: maxY,
+                  minX: 0,
+                  maxX: maxX,
+                  lineTouchData: LineTouchData(
+                    touchTooltipData: LineTouchTooltipData(
+                      getTooltipItems: (items) {
+                        return items.map((item) {
+                          final idx = item.x.toInt().clamp(0, labels.length - 1);
+                          return LineTooltipItem(
+                            '${series[item.barIndex].name}: ${item.y.toStringAsFixed(3)}\n${labels[idx]}',
+                            TextStyle(color: series[item.barIndex].color, fontWeight: FontWeight.w600),
+                          );
+                        }).toList();
+                      },
+                    ),
+                  ),
+                  titlesData: FlTitlesData(
+                    leftTitles: const AxisTitles(sideTitles: SideTitles(showTitles: true, reservedSize: 38)),
+                    rightTitles: const AxisTitles(sideTitles: SideTitles(showTitles: false)),
+                    topTitles: const AxisTitles(sideTitles: SideTitles(showTitles: false)),
+                    bottomTitles: AxisTitles(
+                      sideTitles: SideTitles(
+                        showTitles: true,
+                        reservedSize: 34,
+                        interval: labels.length <= 1
+                            ? 1
+                            : ((labels.length - 1) / 3).toDouble(),
+                        getTitlesWidget: (value, _) {
+                          if (labels.isEmpty) return const SizedBox.shrink();
+                          final idx = value.toInt().clamp(0, labels.length - 1);
+                          final keyTicks = {
+                            0,
+                            labels.length ~/ 3,
+                            (labels.length * 2) ~/ 3,
+                            labels.length - 1,
+                          };
+                          if (!keyTicks.contains(idx)) return const SizedBox.shrink();
+                          return Padding(
+                            padding: const EdgeInsets.only(top: 8),
+                            child: Text(labels[idx], style: const TextStyle(fontSize: 10)),
+                          );
+                        },
+                      ),
+                    ),
+                  ),
+                  gridData: FlGridData(
+                    show: true,
+                    drawVerticalLine: false,
+                    getDrawingHorizontalLine: (_) => const FlLine(color: Color(0xFF2A3340), strokeWidth: 1),
+                  ),
+                  borderData: FlBorderData(show: false),
+                  lineBarsData: series
+                      .map(
+                        (s) => LineChartBarData(
+                          spots: s.spots,
+                          isCurved: false,
+                          color: s.color,
+                          barWidth: 2.3,
+                          dotData: const FlDotData(show: false),
+                        ),
+                      )
+                      .toList(),
+                ),
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+class _DashboardAnalyticsTabs extends StatelessWidget {
+  const _DashboardAnalyticsTabs({
+    required this.deviceLabel,
+    required this.latest,
+    required this.readings,
+    required this.labels,
+    required this.vibrationRange,
+    required this.energyRange,
+    required this.faultRange,
+    required this.accelXSpots,
+    required this.accelYSpots,
+    required this.accelZSpots,
+    required this.bpfiSpots,
+    required this.bpfoSpots,
+    required this.bsfSpots,
+    required this.ftfSpots,
+    required this.scoreSpots,
+    required this.warnLine,
+    required this.faultLine,
+  });
+
+  final String deviceLabel;
+  final SensorReading latest;
+  final List<SensorReading> readings;
+  final List<String> labels;
+  final _AxisRange vibrationRange;
+  final _AxisRange energyRange;
+  final _AxisRange faultRange;
+  final List<FlSpot> accelXSpots;
+  final List<FlSpot> accelYSpots;
+  final List<FlSpot> accelZSpots;
+  final List<FlSpot> bpfiSpots;
+  final List<FlSpot> bpfoSpots;
+  final List<FlSpot> bsfSpots;
+  final List<FlSpot> ftfSpots;
+  final List<FlSpot> scoreSpots;
+  final List<FlSpot> warnLine;
+  final List<FlSpot> faultLine;
+
+  @override
+  Widget build(BuildContext context) {
+    return DefaultTabController(
+      length: 4,
+      child: Card(
+        child: Padding(
+          padding: const EdgeInsets.all(16),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            children: [
+              Text(
+                'Analytics',
+                style: Theme.of(context).textTheme.titleMedium?.copyWith(
+                      fontWeight: FontWeight.w700,
+                    ),
+              ),
+              const SizedBox(height: 10),
+              TabBar(
+                tabAlignment: TabAlignment.start,
+                isScrollable: true,
+                tabs: const [
+                  Tab(text: 'Overview'),
+                  Tab(text: 'Vibration'),
+                  Tab(text: 'Energy'),
+                  Tab(text: 'Fault & Alerts'),
+                ],
+              ),
+              const SizedBox(height: 14),
+              SizedBox(
+                height: 500,
+                child: TabBarView(
+                  children: [
+                    ListView(
+                      children: [
+                        _MiniInfoCard(latest: latest),
+                        const SizedBox(height: 12),
+                        _MultiLineChartCard(
+                          title: 'Fault Score Trend',
+                          labels: labels,
+                          minY: faultRange.min,
+                          maxY: faultRange.max,
+                          series: [
+                            _LineSeries(
+                              name: 'Fault score',
+                              color: const Color(0xFFEF4444),
+                              spots: scoreSpots,
+                            ),
+                          ],
+                        ),
+                      ],
+                    ),
+                    _MultiLineChartCard(
+                      title: 'Vibration by Axis (g)',
+                      labels: labels,
+                      minY: vibrationRange.min,
+                      maxY: vibrationRange.max,
+                      series: [
+                        _LineSeries(name: 'X axis', color: const Color(0xFF18B8C8), spots: accelXSpots),
+                        _LineSeries(name: 'Y axis', color: const Color(0xFFEAB308), spots: accelYSpots),
+                        _LineSeries(name: 'Z axis', color: const Color(0xFF3B82F6), spots: accelZSpots),
+                      ],
+                    ),
+                    _MultiLineChartCard(
+                      title: 'Bearing Energy Bands (a.u.)',
+                      labels: labels,
+                      minY: energyRange.min,
+                      maxY: energyRange.max,
+                      series: [
+                        _LineSeries(name: 'BPFI', color: const Color(0xFF14B8A6), spots: bpfiSpots),
+                        _LineSeries(name: 'BPFO', color: const Color(0xFF06B6D4), spots: bpfoSpots),
+                        _LineSeries(name: 'BSF', color: const Color(0xFF6366F1), spots: bsfSpots),
+                        _LineSeries(name: 'FTF', color: const Color(0xFFEC4899), spots: ftfSpots),
+                      ],
+                    ),
+                    ListView(
+                      children: [
+                        _MultiLineChartCard(
+                          title: 'Fault Score vs Thresholds',
+                          labels: labels,
+                          minY: faultRange.min,
+                          maxY: faultRange.max,
+                          series: [
+                            _LineSeries(name: 'Fault score', color: const Color(0xFFEF4444), spots: scoreSpots),
+                            _LineSeries(name: 'Warn threshold', color: const Color(0xFFEAB308), spots: warnLine),
+                            _LineSeries(name: 'Fault threshold', color: const Color(0xFFDC2626), spots: faultLine),
+                          ],
+                        ),
+                        const SizedBox(height: 12),
+                        _FaultHistoryCard(deviceLabel: deviceLabel, readings: readings),
+                      ],
+                    ),
+                  ],
+                ),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+class _MiniInfoCard extends StatelessWidget {
+  const _MiniInfoCard({required this.latest});
+
+  final SensorReading latest;
 
   @override
   Widget build(BuildContext context) {
@@ -822,61 +1149,17 @@ class _ChartCard extends StatelessWidget {
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
             Text(
-              title,
-              style: Theme.of(
-                context,
-              ).textTheme.titleMedium?.copyWith(fontWeight: FontWeight.w700),
-            ),
-            const SizedBox(height: 10),
-            SizedBox(
-              height: 210,
-              child: LineChart(
-                LineChartData(
-                  minY: minY,
-                  maxY: maxY,
-                  lineTouchData: const LineTouchData(enabled: true),
-                  titlesData: const FlTitlesData(
-                    leftTitles: AxisTitles(
-                      sideTitles: SideTitles(showTitles: true, reservedSize: 36),
-                    ),
-                    rightTitles: AxisTitles(
-                      sideTitles: SideTitles(showTitles: false),
-                    ),
-                    topTitles: AxisTitles(
-                      sideTitles: SideTitles(showTitles: false),
-                    ),
-                    bottomTitles: AxisTitles(
-                      sideTitles: SideTitles(showTitles: false),
-                    ),
+              'Latest Snapshot',
+              style: Theme.of(context).textTheme.titleSmall?.copyWith(
+                    fontWeight: FontWeight.w700,
                   ),
-                  gridData: FlGridData(
-                    show: true,
-                    drawVerticalLine: false,
-                    horizontalInterval: (maxY - minY) / 4,
-                    getDrawingHorizontalLine: (_) => const FlLine(
-                      color: Color(0xFF2A3340),
-                      strokeWidth: 1,
-                    ),
-                  ),
-                  borderData: FlBorderData(show: false),
-                  lineBarsData: [
-                    LineChartBarData(
-                      spots: spots,
-                      // Straight segments: curved splines can overshoot and show
-                      // fake peaks (e.g. near 1.0) while every sample is 0.
-                      isCurved: false,
-                      color: color,
-                      barWidth: 2.4,
-                      belowBarData: BarAreaData(
-                        show: true,
-                        color: color.withValues(alpha: 0.17),
-                      ),
-                      dotData: const FlDotData(show: false),
-                    ),
-                  ],
-                ),
-              ),
             ),
+            const SizedBox(height: 8),
+            Text('Timestamp: ${DateFormat('yyyy-MM-dd HH:mm:ss').format(latest.timestamp)}'),
+            const SizedBox(height: 4),
+            Text('Temperature: ${latest.temperature.toStringAsFixed(2)} °C'),
+            const SizedBox(height: 4),
+            Text('Fault score: ${latest.faultScore.toStringAsFixed(4)}'),
           ],
         ),
       ),
@@ -1047,8 +1330,6 @@ class AlertEntry {
   final String message;
 }
 
-/// Alerts use the **loaded chart window** (not only the latest point), so past
-/// spikes still show after the current sample returns to zero.
 List<AlertEntry> liveAlertsFromReadings(
   String deviceLabel,
   List<SensorReading> readings,
@@ -1057,73 +1338,49 @@ List<AlertEntry> liveAlertsFromReadings(
 
   final latest = newestReading(readings);
   final out = <AlertEntry>[];
-
-  final peakVib = readings.reduce(
-    (a, b) => a.vibration >= b.vibration ? a : b,
-  );
-  if (readings.any((r) => vibrationAlertActive(r.vibration))) {
-    SensorReading? lastHitFromNewest;
-    var kFromLatest = 0;
-    for (var i = readings.length - 1; i >= 0; i--) {
-      if (vibrationAlertActive(readings[i].vibration)) {
-        lastHitFromNewest = readings[i];
-        kFromLatest = readings.length - i;
-        break;
-      }
-    }
-    final secPerPoint = _estimatedSecondsPerDataPoint(readings);
-    final estSecondsAgo = kFromLatest * secPerPoint;
-    final vibMsg = lastHitFromNewest != null
-        ? '${lastHitFromNewest.vibration.toStringAsFixed(2)} mm/s — '
-            '${_ordinalFromLatest(kFromLatest)} : '
-            '${_formatRoughAgo(estSecondsAgo)} '
-            '(≈${secPerPoint.toStringAsFixed(1)}s per point). '
-            'Current ${latest.vibration.toStringAsFixed(2)} mm/s. '
-            'Peak in window ${peakVib.vibration.toStringAsFixed(2)} mm/s.'
-        : 'Alert when any sample > 0.';
-
+  if (latest.status == HealthStatus.fault) {
     out.add(
       AlertEntry(
-        title: 'Vibration alert',
+        title: 'Fault status',
         deviceId: deviceLabel,
-        timestamp: lastHitFromNewest?.timestamp ?? peakVib.timestamp,
+        timestamp: latest.timestamp,
+        status: HealthStatus.fault,
+        message:
+            'Fault score ${latest.faultScore.toStringAsFixed(4)} is above fault threshold ${latest.faultThreshold.toStringAsFixed(4)}.',
+      ),
+    );
+  } else if (latest.status == HealthStatus.warning) {
+    out.add(
+      AlertEntry(
+        title: 'Warning status',
+        deviceId: deviceLabel,
+        timestamp: latest.timestamp,
         status: HealthStatus.warning,
-        message: vibMsg,
+        message:
+            'Fault score ${latest.faultScore.toStringAsFixed(4)} is above warning threshold ${latest.warnThreshold.toStringAsFixed(4)}.',
       ),
     );
   }
-
-  final peakTemp = readings.reduce(
-    (a, b) => a.temperature >= b.temperature ? a : b,
-  );
-  if (readings.any((r) => temperatureAlertActive(r.temperature))) {
-    SensorReading? lastTempHitFromNewest;
-    var kTempFromLatest = 0;
-    for (var i = readings.length - 1; i >= 0; i--) {
-      if (temperatureAlertActive(readings[i].temperature)) {
-        lastTempHitFromNewest = readings[i];
-        kTempFromLatest = readings.length - i;
-        break;
-      }
-    }
-    final secPerPointTemp = _estimatedSecondsPerDataPoint(readings);
-    final estTempSecondsAgo = kTempFromLatest * secPerPointTemp;
-    final tempMsg = lastTempHitFromNewest != null
-        ? '${lastTempHitFromNewest.temperature.toStringAsFixed(1)} °C — '
-            '${_ordinalFromLatest(kTempFromLatest)} : '
-            '${_formatRoughAgo(estTempSecondsAgo)} '
-            '(≈${secPerPointTemp.toStringAsFixed(1)}s per point). '
-            'Current ${latest.temperature.toStringAsFixed(1)} °C. '
-            'Peak in window ${peakTemp.temperature.toStringAsFixed(1)} °C.'
-        : 'Alert when any sample ≥ 25 °C.';
-
+  if (latest.tempAlert) {
     out.add(
       AlertEntry(
         title: 'Temperature alert',
         deviceId: deviceLabel,
-        timestamp: lastTempHitFromNewest?.timestamp ?? peakTemp.timestamp,
+        timestamp: latest.timestamp,
         status: HealthStatus.warning,
-        message: tempMsg,
+        message: 'Temperature alert flag is active (${latest.temperature.toStringAsFixed(2)} °C).',
+      ),
+    );
+  }
+  if (latest.vibrationAlert) {
+    out.add(
+      AlertEntry(
+        title: 'Vibration alert',
+        deviceId: deviceLabel,
+        timestamp: latest.timestamp,
+        status: HealthStatus.warning,
+        message:
+            'Vibration alert flag is active. Axes: X=${latest.accelX.toStringAsFixed(3)} g, Y=${latest.accelY.toStringAsFixed(3)} g, Z=${latest.accelZ.toStringAsFixed(3)} g.',
       ),
     );
   }
@@ -1131,70 +1388,74 @@ List<AlertEntry> liveAlertsFromReadings(
   return out;
 }
 
-class _LiveThresholdAlerts extends StatelessWidget {
-  const _LiveThresholdAlerts({
-    required this.deviceLabel,
-    required this.readings,
-  });
+class _FaultHistoryCard extends StatelessWidget {
+  const _FaultHistoryCard({required this.deviceLabel, required this.readings});
 
   final String deviceLabel;
   final List<SensorReading> readings;
 
   @override
   Widget build(BuildContext context) {
-    final entries = liveAlertsFromReadings(deviceLabel, readings);
-    if (entries.isEmpty) {
-      return const SizedBox.shrink();
-    }
-
-    final scheme = Theme.of(context).colorScheme;
-    return Column(
-      crossAxisAlignment: CrossAxisAlignment.stretch,
-      children: [
-        Text(
-          'Active alerts',
-          style: Theme.of(context).textTheme.titleSmall?.copyWith(
-                fontWeight: FontWeight.w700,
-                color: scheme.error,
-              ),
+    final events = readings.where((r) => r.status != HealthStatus.normal || r.tempAlert || r.vibrationAlert).toList()
+      ..sort((a, b) => b.timestamp.compareTo(a.timestamp));
+    return Card(
+      child: Padding(
+        padding: const EdgeInsets.all(14),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Text('Fault History & Alerts', style: Theme.of(context).textTheme.titleMedium?.copyWith(fontWeight: FontWeight.w700)),
+            const SizedBox(height: 10),
+            if (events.isEmpty)
+              const Text('No warning/fault events in the loaded window.')
+            else
+              ...events.take(12).map((event) => Padding(
+                    padding: const EdgeInsets.only(bottom: 8),
+                    child: _HistoryRow(deviceLabel: deviceLabel, reading: event),
+                  )),
+          ],
         ),
-        const SizedBox(height: 8),
-        ...entries.map(
-          (e) => Padding(
-            padding: const EdgeInsets.only(bottom: 8),
-            child: Material(
-              color: scheme.errorContainer.withValues(alpha: 0.35),
-              borderRadius: BorderRadius.circular(12),
-              child: Padding(
-                padding: const EdgeInsets.all(12),
-                child: Row(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    Icon(Icons.notifications_active_rounded, color: scheme.error),
-                    const SizedBox(width: 10),
-                    Expanded(
-                      child: Column(
-                        crossAxisAlignment: CrossAxisAlignment.start,
-                        children: [
-                          Text(
-                            e.title,
-                            style: const TextStyle(fontWeight: FontWeight.w700),
-                          ),
-                          const SizedBox(height: 4),
-                          Text(
-                            e.message,
-                            style: Theme.of(context).textTheme.bodySmall,
-                          ),
-                        ],
-                      ),
-                    ),
-                  ],
-                ),
-              ),
+      ),
+    );
+  }
+}
+
+class _HistoryRow extends StatelessWidget {
+  const _HistoryRow({required this.deviceLabel, required this.reading});
+
+  final String deviceLabel;
+  final SensorReading reading;
+
+  @override
+  Widget build(BuildContext context) {
+    final color = switch (reading.status) {
+      HealthStatus.normal => const Color(0xFF22C55E),
+      HealthStatus.warning => const Color(0xFFEAB308),
+      HealthStatus.fault => const Color(0xFFEF4444),
+    };
+    return Container(
+      padding: const EdgeInsets.all(10),
+      decoration: BoxDecoration(
+        borderRadius: BorderRadius.circular(12),
+        border: Border.all(color: color.withValues(alpha: 0.5)),
+        color: color.withValues(alpha: 0.1),
+      ),
+      child: Row(
+        children: [
+          Icon(Icons.timeline_rounded, color: color),
+          const SizedBox(width: 10),
+          Expanded(
+            child: Text(
+              '${reading.status.name.toUpperCase()} • score ${reading.faultScore.toStringAsFixed(4)} '
+              '• ${DateFormat('yyyy-MM-dd HH:mm:ss').format(reading.timestamp)} '
+              '• $deviceLabel'
+              '${reading.tempAlert ? ' • Temp alert' : ''}'
+              '${reading.vibrationAlert ? ' • Vib alert' : ''}',
+              style: Theme.of(context).textTheme.bodySmall,
             ),
           ),
-        ),
-      ],
+        ],
+      ),
     );
   }
 }
