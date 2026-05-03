@@ -1,0 +1,11 @@
+# Firebase service account credentials (NEVER commit)
+*firebase-adminsdk*.json
+*serviceAccountKey*.json
+
+# Model artifacts (large binaries)
+deployment/artifacts/*.pkl
+
+# Python cache
+__pycache__/
+*.pyc
+*.pyo

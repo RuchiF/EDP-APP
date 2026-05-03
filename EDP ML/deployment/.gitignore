@@ -1,0 +1,12 @@
+# Credentials (NEVER commit these)
+*.json
+!render.yaml
+.env
+
+# Model artifacts (too large for git — upload separately)
+artifacts/*.pkl
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
