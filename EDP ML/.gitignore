@@ -2,8 +2,7 @@
 *firebase-adminsdk*.json
 *serviceAccountKey*.json
 
-# Model artifacts (large binaries)
-deployment/artifacts/*.pkl
+
 
 # Python cache
 __pycache__/
