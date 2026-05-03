@@ -112,6 +112,7 @@ class _AppShellState extends State<AppShell> {
     final pages = <Widget>[
       const DashboardScreen(),
       const AlertsScreen(),
+      const FaultsScreen(),
       const MlPredictionsScreen(),
     ];
 
@@ -139,6 +140,11 @@ class _AppShellState extends State<AppShell> {
             icon: Icon(Icons.warning_amber_outlined),
             selectedIcon: Icon(Icons.warning_amber_rounded),
             label: 'Alerts',
+          ),
+          NavigationDestination(
+            icon: Icon(Icons.report_problem_outlined),
+            selectedIcon: Icon(Icons.report_problem_rounded),
+            label: 'Faults',
           ),
           NavigationDestination(
             icon: Icon(Icons.psychology_outlined),
@@ -620,9 +626,9 @@ class _Header extends StatelessWidget {
         const SizedBox(height: 4),
         Text(
           subtitle,
-          style: Theme.of(
-            context,
-          ).textTheme.bodyMedium?.copyWith(color: Colors.white70),
+          style: Theme.of(context).textTheme.bodyMedium?.copyWith(
+                color: Theme.of(context).colorScheme.onSurface.withValues(alpha: 0.6),
+              ),
         ),
       ],
     );
@@ -755,7 +761,7 @@ class MetricCard extends StatelessWidget {
               child: Column(
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
-                  Text(label, style: const TextStyle(color: Colors.white70)),
+                  Text(label, style: TextStyle(color: Theme.of(context).colorScheme.onSurface.withValues(alpha: 0.6))),
                   const SizedBox(height: 6),
                   Text(
                     value,
@@ -1569,12 +1575,12 @@ class _AlertRow extends StatelessWidget {
                 const SizedBox(height: 4),
                 Text(
                   entry.message,
-                  style: const TextStyle(color: Colors.white70),
+                  style: TextStyle(color: Theme.of(context).colorScheme.onSurface.withValues(alpha: 0.7)),
                 ),
                 const SizedBox(height: 6),
                 Text(
                   '${entry.deviceId} • ${DateFormat('dd MMM, HH:mm').format(entry.timestamp)}',
-                  style: const TextStyle(fontSize: 12, color: Colors.white54),
+                  style: TextStyle(fontSize: 12, color: Theme.of(context).colorScheme.onSurface.withValues(alpha: 0.5)),
                 ),
               ],
             ),
@@ -1594,18 +1600,442 @@ class _EmptyAlertsState extends StatelessWidget {
       child: Padding(
         padding: const EdgeInsets.symmetric(vertical: 30, horizontal: 14),
         child: Column(
-          children: const [
-            Icon(Icons.inbox_rounded, size: 36, color: Colors.white54),
-            SizedBox(height: 10),
-            Text('No alerts available', style: TextStyle(fontWeight: FontWeight.w600)),
-            SizedBox(height: 4),
+          children: [
+            Icon(Icons.inbox_rounded, size: 36, color: Theme.of(context).colorScheme.onSurface.withValues(alpha: 0.5)),
+            const SizedBox(height: 10),
+            const Text('No alerts available', style: TextStyle(fontWeight: FontWeight.w600)),
+            const SizedBox(height: 4),
             Text(
               'The selected devices are operating within normal ranges.',
               textAlign: TextAlign.center,
-              style: TextStyle(color: Colors.white70),
+              style: TextStyle(color: Theme.of(context).colorScheme.onSurface.withValues(alpha: 0.6)),
             ),
           ],
         ),
+      ),
+    );
+  }
+}
+
+/// Dedicated Faults screen – detailed drilldown for every warning/fault reading.
+class FaultsScreen extends StatelessWidget {
+  const FaultsScreen({super.key});
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    final isDark = theme.brightness == Brightness.dark;
+    final muted = theme.colorScheme.onSurface.withValues(alpha: 0.6);
+
+    return SafeArea(
+      child: StreamBuilder<List<Device>>(
+        stream: devicesStream(),
+        builder: (context, deviceSnapshot) {
+          if (deviceSnapshot.connectionState == ConnectionState.waiting) {
+            return const Center(child: CircularProgressIndicator());
+          }
+          if (deviceSnapshot.hasError) {
+            return Center(
+              child: Padding(
+                padding: const EdgeInsets.all(24),
+                child: Text('Unable to load devices.\n${deviceSnapshot.error}'),
+              ),
+            );
+          }
+
+          final devices = deviceSnapshot.data ?? const <Device>[];
+          if (devices.isEmpty) {
+            return ListView(
+              padding: const EdgeInsets.all(20),
+              children: [
+                _Header(
+                  title: 'Fault Details',
+                  subtitle: 'Detailed breakdown of every fault and warning event',
+                ),
+                const SizedBox(height: 24),
+                Card(
+                  child: Padding(
+                    padding: const EdgeInsets.symmetric(vertical: 30, horizontal: 14),
+                    child: Column(
+                      children: [
+                        Icon(Icons.verified_user_rounded, size: 42, color: muted),
+                        const SizedBox(height: 10),
+                        const Text('No devices found', style: TextStyle(fontWeight: FontWeight.w600)),
+                        const SizedBox(height: 4),
+                        Text(
+                          'Add devices in Firestore to see fault details.',
+                          textAlign: TextAlign.center,
+                          style: TextStyle(color: muted),
+                        ),
+                      ],
+                    ),
+                  ),
+                ),
+              ],
+            );
+          }
+
+          return ListView(
+            padding: const EdgeInsets.all(20),
+            children: [
+              const _Header(
+                title: 'Fault Details',
+                subtitle: 'Detailed breakdown of every fault and warning event',
+              ),
+              const SizedBox(height: 20),
+              ...devices.map((d) => _DeviceFaultDetailSection(device: d)),
+              Padding(
+                padding: const EdgeInsets.only(top: 8, bottom: 20),
+                child: Text(
+                  'Showing up to 120 samples per device from the loaded window.',
+                  style: theme.textTheme.bodySmall?.copyWith(color: muted),
+                ),
+              ),
+            ],
+          );
+        },
+      ),
+    );
+  }
+}
+
+class _DeviceFaultDetailSection extends StatelessWidget {
+  const _DeviceFaultDetailSection({required this.device});
+
+  final Device device;
+
+  @override
+  Widget build(BuildContext context) {
+    return StreamBuilder<List<SensorReading>>(
+      stream: sensorReadingsStream(device.id),
+      builder: (context, readingSnapshot) {
+        if (readingSnapshot.connectionState == ConnectionState.waiting) {
+          return const Padding(
+            padding: EdgeInsets.only(bottom: 16),
+            child: LinearProgressIndicator(minHeight: 2),
+          );
+        }
+        if (readingSnapshot.hasError) {
+          return Padding(
+            padding: const EdgeInsets.only(bottom: 16),
+            child: Text(
+              '${device.label}: ${readingSnapshot.error}',
+              style: TextStyle(color: Theme.of(context).colorScheme.error),
+            ),
+          );
+        }
+
+        final readings = readingSnapshot.data ?? const <SensorReading>[];
+        final faultEvents = readings
+            .where((r) => r.status != HealthStatus.normal || r.tempAlert || r.vibrationAlert)
+            .toList()
+          ..sort((a, b) => b.timestamp.compareTo(a.timestamp));
+
+        if (faultEvents.isEmpty) return const SizedBox.shrink();
+
+        return Padding(
+          padding: const EdgeInsets.only(bottom: 20),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Padding(
+                padding: const EdgeInsets.only(bottom: 12),
+                child: Row(
+                  children: [
+                    Icon(Icons.precision_manufacturing_rounded,
+                        size: 20, color: Theme.of(context).colorScheme.primary),
+                    const SizedBox(width: 8),
+                    Text(
+                      device.label,
+                      style: Theme.of(context).textTheme.titleMedium?.copyWith(
+                            fontWeight: FontWeight.w700,
+                          ),
+                    ),
+                    const SizedBox(width: 8),
+                    Container(
+                      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
+                      decoration: BoxDecoration(
+                        borderRadius: BorderRadius.circular(8),
+                        color: Theme.of(context).colorScheme.primary.withValues(alpha: 0.15),
+                      ),
+                      child: Text(
+                        '${faultEvents.length} event${faultEvents.length == 1 ? '' : 's'}',
+                        style: Theme.of(context).textTheme.labelSmall?.copyWith(
+                              fontWeight: FontWeight.w600,
+                              color: Theme.of(context).colorScheme.primary,
+                            ),
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+              ...faultEvents.take(20).map((reading) => Padding(
+                    padding: const EdgeInsets.only(bottom: 10),
+                    child: _FaultDetailCard(deviceLabel: device.label, reading: reading),
+                  )),
+            ],
+          ),
+        );
+      },
+    );
+  }
+}
+
+class _FaultDetailCard extends StatelessWidget {
+  const _FaultDetailCard({required this.deviceLabel, required this.reading});
+
+  final String deviceLabel;
+  final SensorReading reading;
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    final isDark = theme.brightness == Brightness.dark;
+    final statusColor = switch (reading.status) {
+      HealthStatus.normal => const Color(0xFF22C55E),
+      HealthStatus.warning => const Color(0xFFEAB308),
+      HealthStatus.fault => const Color(0xFFEF4444),
+    };
+    final muted = theme.colorScheme.onSurface.withValues(alpha: 0.55);
+    final subtleBorder = isDark ? const Color(0xFF232A34) : const Color(0xFFDCE4EE);
+
+    return Card(
+      shape: RoundedRectangleBorder(
+        borderRadius: BorderRadius.circular(16),
+        side: BorderSide(color: statusColor.withValues(alpha: 0.4)),
+      ),
+      child: Padding(
+        padding: const EdgeInsets.all(16),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            // Header row: status badge + timestamp
+            Row(
+              children: [
+                Container(
+                  padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 5),
+                  decoration: BoxDecoration(
+                    color: statusColor.withValues(alpha: 0.15),
+                    borderRadius: BorderRadius.circular(999),
+                    border: Border.all(color: statusColor.withValues(alpha: 0.5)),
+                  ),
+                  child: Row(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      Icon(Icons.circle, size: 8, color: statusColor),
+                      const SizedBox(width: 6),
+                      Text(
+                        reading.status.name.toUpperCase(),
+                        style: TextStyle(
+                          fontWeight: FontWeight.w700,
+                          fontSize: 12,
+                          color: statusColor,
+                          letterSpacing: 0.5,
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+                const Spacer(),
+                Icon(Icons.schedule_rounded, size: 14, color: muted),
+                const SizedBox(width: 4),
+                Text(
+                  DateFormat('dd MMM yyyy, HH:mm:ss').format(reading.timestamp),
+                  style: theme.textTheme.labelSmall?.copyWith(
+                        color: muted,
+                        fontFeatures: const [FontFeature.tabularFigures()],
+                      ),
+                ),
+              ],
+            ),
+            const SizedBox(height: 14),
+            // Metrics grid
+            Container(
+              padding: const EdgeInsets.all(12),
+              decoration: BoxDecoration(
+                borderRadius: BorderRadius.circular(12),
+                color: isDark ? const Color(0xFF111821) : const Color(0xFFF4F7FB),
+                border: Border.all(color: subtleBorder),
+              ),
+              child: Column(
+                children: [
+                  _FaultMetricRow(
+                    icon: Icons.graphic_eq_rounded,
+                    label: 'Fault Score',
+                    value: reading.faultScore.toStringAsFixed(4),
+                    accent: const Color(0xFFEF4444),
+                  ),
+                  const SizedBox(height: 8),
+                  _FaultMetricRow(
+                    icon: Icons.warning_amber_rounded,
+                    label: 'Warn Threshold',
+                    value: reading.warnThreshold.toStringAsFixed(4),
+                    accent: const Color(0xFFEAB308),
+                  ),
+                  const SizedBox(height: 8),
+                  _FaultMetricRow(
+                    icon: Icons.error_outline_rounded,
+                    label: 'Fault Threshold',
+                    value: reading.faultThreshold.toStringAsFixed(4),
+                    accent: const Color(0xFFDC2626),
+                  ),
+                  const Divider(height: 20),
+                  _FaultMetricRow(
+                    icon: Icons.thermostat_rounded,
+                    label: 'Temperature',
+                    value: '${reading.temperature.toStringAsFixed(2)} °C',
+                    accent: const Color(0xFF3B82F6),
+                  ),
+                  const SizedBox(height: 8),
+                  _FaultMetricRow(
+                    icon: Icons.vibration_rounded,
+                    label: 'Accel (X / Y / Z)',
+                    value:
+                        '${reading.accelX.toStringAsFixed(3)} / ${reading.accelY.toStringAsFixed(3)} / ${reading.accelZ.toStringAsFixed(3)} g',
+                    accent: const Color(0xFF18B8C8),
+                  ),
+                  const SizedBox(height: 8),
+                  _FaultMetricRow(
+                    icon: Icons.speed_rounded,
+                    label: 'Accel Magnitude',
+                    value: '${reading.accelMagnitude.toStringAsFixed(3)} g',
+                    accent: const Color(0xFF8B5CF6),
+                  ),
+                ],
+              ),
+            ),
+            // Alert flags
+            if (reading.tempAlert || reading.vibrationAlert) ...[
+              const SizedBox(height: 12),
+              Wrap(
+                spacing: 8,
+                runSpacing: 6,
+                children: [
+                  if (reading.tempAlert)
+                    _AlertFlagChip(
+                      label: 'Temp Alert',
+                      icon: Icons.thermostat_auto_rounded,
+                      color: const Color(0xFFF97316),
+                    ),
+                  if (reading.vibrationAlert)
+                    _AlertFlagChip(
+                      label: 'Vibration Alert',
+                      icon: Icons.vibration_rounded,
+                      color: const Color(0xFFEC4899),
+                    ),
+                ],
+              ),
+            ],
+            // Energy bands
+            if (reading.bpfiEnergy > 0 || reading.bpfoEnergy > 0 || reading.bsfEnergy > 0 || reading.ftfEnergy > 0) ...[
+              const SizedBox(height: 12),
+              Container(
+                padding: const EdgeInsets.all(10),
+                decoration: BoxDecoration(
+                  borderRadius: BorderRadius.circular(10),
+                  color: isDark ? const Color(0xFF0D1117) : const Color(0xFFF8FAFC),
+                  border: Border.all(color: subtleBorder),
+                ),
+                child: Row(
+                  children: [
+                    Icon(Icons.bar_chart_rounded, size: 16, color: muted),
+                    const SizedBox(width: 8),
+                    Expanded(
+                      child: Text(
+                        'BPFI: ${reading.bpfiEnergy.toStringAsFixed(4)}  •  '
+                        'BPFO: ${reading.bpfoEnergy.toStringAsFixed(4)}  •  '
+                        'BSF: ${reading.bsfEnergy.toStringAsFixed(4)}  •  '
+                        'FTF: ${reading.ftfEnergy.toStringAsFixed(4)}',
+                        style: theme.textTheme.labelSmall?.copyWith(
+                              color: muted,
+                              fontFeatures: const [FontFeature.tabularFigures()],
+                            ),
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+            ],
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+class _FaultMetricRow extends StatelessWidget {
+  const _FaultMetricRow({
+    required this.icon,
+    required this.label,
+    required this.value,
+    required this.accent,
+  });
+
+  final IconData icon;
+  final String label;
+  final String value;
+  final Color accent;
+
+  @override
+  Widget build(BuildContext context) {
+    return Row(
+      children: [
+        Icon(icon, size: 16, color: accent),
+        const SizedBox(width: 8),
+        Expanded(
+          child: Text(
+            label,
+            style: Theme.of(context).textTheme.bodySmall?.copyWith(
+                  color: Theme.of(context).colorScheme.onSurface.withValues(alpha: 0.6),
+                ),
+          ),
+        ),
+        Text(
+          value,
+          style: Theme.of(context).textTheme.bodySmall?.copyWith(
+                fontWeight: FontWeight.w700,
+                fontFeatures: const [FontFeature.tabularFigures()],
+              ),
+        ),
+      ],
+    );
+  }
+}
+
+class _AlertFlagChip extends StatelessWidget {
+  const _AlertFlagChip({
+    required this.label,
+    required this.icon,
+    required this.color,
+  });
+
+  final String label;
+  final IconData icon;
+  final Color color;
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 5),
+      decoration: BoxDecoration(
+        borderRadius: BorderRadius.circular(999),
+        color: color.withValues(alpha: 0.12),
+        border: Border.all(color: color.withValues(alpha: 0.4)),
+      ),
+      child: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Icon(icon, size: 14, color: color),
+          const SizedBox(width: 5),
+          Text(
+            label,
+            style: TextStyle(
+              fontSize: 12,
+              fontWeight: FontWeight.w600,
+              color: color,
+            ),
+          ),
+        ],
       ),
     );
   }

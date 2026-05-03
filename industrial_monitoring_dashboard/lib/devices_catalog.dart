@@ -62,7 +62,11 @@ class DeviceSelector extends StatelessWidget {
                         : Colors.white,
                 borderRadius: BorderRadius.circular(14),
                 border: Border.all(
-                  color: selected ? const Color(0xFF1FC9DA) : const Color(0xFF2A3340),
+                  color: selected
+                      ? const Color(0xFF1FC9DA)
+                      : isDark
+                          ? const Color(0xFF2A3340)
+                          : const Color(0xFFDCE4EE),
                 ),
               ),
               child: Column(
