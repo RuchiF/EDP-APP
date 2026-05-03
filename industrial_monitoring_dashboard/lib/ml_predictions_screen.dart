@@ -6,20 +6,17 @@ import 'package:industrial_monitoring_dashboard/ml_api_config.dart';
 import 'package:intl/intl.dart';
 
 /// Bearing-risk prediction UI (calls `/predict` only).
+/// Styled to match Dashboard & Faults screens.
 class MlPredictionsScreen extends StatefulWidget {
   const MlPredictionsScreen({super.key});
-
-  static const Color _accent = Color(0xFF18B8C8);
 
   @override
   State<MlPredictionsScreen> createState() => _MlPredictionsScreenState();
 }
 
-class _MlPredictionsScreenState extends State<MlPredictionsScreen>
-    with SingleTickerProviderStateMixin {
+class _MlPredictionsScreenState extends State<MlPredictionsScreen> {
   late final TextEditingController _baseUrlController;
   late final MlApiClient _client;
-  late final AnimationController _pulse;
 
   bool _loading = false;
   String? _error;
@@ -34,19 +31,15 @@ class _MlPredictionsScreenState extends State<MlPredictionsScreen>
   @override
   void initState() {
     super.initState();
-    _baseUrlController = TextEditingController(text: MlApiConfig.embeddedBaseUrl.trim());
+    _baseUrlController =
+        TextEditingController(text: MlApiConfig.embeddedBaseUrl.trim());
     _client = MlApiClient();
-    _pulse = AnimationController(
-      vsync: this,
-      duration: const Duration(milliseconds: 1600),
-    )..repeat(reverse: true);
   }
 
   @override
   void dispose() {
     _baseUrlController.dispose();
     _client.close();
-    _pulse.dispose();
     super.dispose();
   }
 
@@ -57,7 +50,8 @@ class _MlPredictionsScreenState extends State<MlPredictionsScreen>
       _error = null;
     });
     try {
-      final prediction = await _client.predict(_apiBase, machineId: machineId);
+      final prediction =
+          await _client.predict(_apiBase, machineId: machineId);
       if (!mounted) return;
       setState(() => _prediction = prediction);
       HapticFeedback.mediumImpact();
@@ -77,10 +71,8 @@ class _MlPredictionsScreenState extends State<MlPredictionsScreen>
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
     final isDark = theme.brightness == Brightness.dark;
-    final w = MediaQuery.sizeOf(context).width;
-    final pad = w > 700 ? 28.0 : 20.0;
-
-    final bgTop = Color.lerp(theme.scaffoldBackgroundColor, MlPredictionsScreen._accent, isDark ? 0.07 : 0.045)!;
+    final spacing = MediaQuery.sizeOf(context).width > 700 ? 24.0 : 18.0;
+    final muted = theme.colorScheme.onSurface.withValues(alpha: 0.6);
 
     return SafeArea(
       child: StreamBuilder<List<Device>>(
@@ -88,7 +80,8 @@ class _MlPredictionsScreenState extends State<MlPredictionsScreen>
         builder: (context, deviceSnapshot) {
           final devices = deviceSnapshot.data ?? const <Device>[];
           if (devices.isNotEmpty &&
-              (_selectedDeviceId == null || devices.every((d) => d.id != _selectedDeviceId))) {
+              (_selectedDeviceId == null ||
+                  devices.every((d) => d.id != _selectedDeviceId))) {
             WidgetsBinding.instance.addPostFrameCallback((_) {
               if (!mounted) return;
               setState(() => _selectedDeviceId = devices.first.id);
@@ -98,78 +91,145 @@ class _MlPredictionsScreenState extends State<MlPredictionsScreen>
           final selectedIndex = _selectedDeviceId == null
               ? -1
               : devices.indexWhere((d) => d.id == _selectedDeviceId);
-          final selectedDevice = selectedIndex >= 0 ? devices[selectedIndex] : null;
+          final selectedDevice =
+              selectedIndex >= 0 ? devices[selectedIndex] : null;
 
-          return DecoratedBox(
-            decoration: BoxDecoration(
-              gradient: LinearGradient(
-                begin: Alignment.topCenter,
-                end: Alignment.bottomCenter,
-                colors: [
-                  bgTop,
-                  theme.scaffoldBackgroundColor,
-                  theme.scaffoldBackgroundColor,
+          return ListView(
+            padding: EdgeInsets.all(spacing),
+            children: [
+              // ── Header (same style as Dashboard / Faults) ──
+              Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(
+                    'ML Predictions',
+                    style: theme.textTheme.headlineSmall
+                        ?.copyWith(fontWeight: FontWeight.w700),
+                  ),
+                  const SizedBox(height: 4),
+                  Text(
+                    'Bearing risk assessment from deployed model',
+                    style: theme.textTheme.bodyMedium
+                        ?.copyWith(color: muted),
+                  ),
                 ],
-                stops: const [0.0, 0.32, 1.0],
               ),
-            ),
-            child: CustomScrollView(
-              physics: const BouncingScrollPhysics(),
-              slivers: [
-                SliverPadding(
-                  padding: EdgeInsets.fromLTRB(pad, pad, pad, 32),
-                  sliver: SliverList(
-                    delegate: SliverChildListDelegate([
-                      _MlScreenHeader(isDark: isDark),
-                      const SizedBox(height: 22),
-                      _ApiUrlField(
+              const SizedBox(height: 18),
+
+              // ── API URL Card ──
+              Card(
+                child: Padding(
+                  padding: const EdgeInsets.all(14),
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text(
+                        'API Endpoint',
+                        style: theme.textTheme.titleSmall
+                            ?.copyWith(fontWeight: FontWeight.w700),
+                      ),
+                      const SizedBox(height: 10),
+                      TextField(
                         controller: _baseUrlController,
-                        isDark: isDark,
-                      ),
-                      if (devices.isNotEmpty) ...[
-                        const SizedBox(height: 20),
-                        Text(
-                          'Machine',
-                          style: theme.textTheme.labelLarge?.copyWith(
-                            letterSpacing: 0.8,
-                            fontWeight: FontWeight.w800,
+                        style: theme.textTheme.bodyMedium?.copyWith(
+                          fontFeatures: const [FontFeature.tabularFigures()],
+                        ),
+                        decoration: InputDecoration(
+                          isDense: true,
+                          hintText: 'Prediction API URL',
+                          prefixIcon: Icon(
+                            Icons.hub_rounded,
+                            color: theme.colorScheme.primary,
+                            size: 22,
                           ),
+                          border: OutlineInputBorder(
+                            borderRadius: BorderRadius.circular(12),
+                            borderSide: BorderSide(
+                              color: isDark
+                                  ? const Color(0xFF232A34)
+                                  : const Color(0xFFDCE4EE),
+                            ),
+                          ),
+                          enabledBorder: OutlineInputBorder(
+                            borderRadius: BorderRadius.circular(12),
+                            borderSide: BorderSide(
+                              color: isDark
+                                  ? const Color(0xFF232A34)
+                                  : const Color(0xFFDCE4EE),
+                            ),
+                          ),
+                          contentPadding: const EdgeInsets.symmetric(
+                              horizontal: 12, vertical: 14),
+                          hintStyle: TextStyle(color: muted),
                         ),
-                        const SizedBox(height: 10),
-                        DeviceSelector(
-                          devices: devices,
-                          selectedIndex: selectedIndex >= 0 ? selectedIndex : 0,
-                          onSelected: (i) =>
-                              setState(() => _selectedDeviceId = devices[i].id),
-                        ),
-                      ],
-                      const SizedBox(height: 26),
-                      _PredictCta(
-                        loading: _loading,
-                        pulse: _pulse,
-                        onPressed: _loading ? null : () => _runPrediction(machineId: selectedDevice?.id),
+                        keyboardType: TextInputType.url,
+                        autocorrect: false,
+                        textInputAction: TextInputAction.done,
                       ),
-                      const SizedBox(height: 30),
-                      AnimatedSwitcher(
-                        duration: const Duration(milliseconds: 340),
-                        switchInCurve: Curves.easeOutCubic,
-                        switchOutCurve: Curves.easeInCubic,
-                        child: _error != null
-                            ? _ErrorPanel(key: const ValueKey('err'), message: _error!)
-                            : _prediction != null
-                                ? _PredictionShowcase(
-                                    key: ValueKey(_prediction!.timestamp ?? _prediction!.prediction),
-                                    prediction: _prediction!,
-                                    isDark: isDark,
-                                  )
-                                : _EmptyState(key: const ValueKey('empty'), isDark: isDark),
-                      ),
-                      const SizedBox(height: 96),
-                    ]),
+                    ],
                   ),
                 ),
+              ),
+              const SizedBox(height: 14),
+
+              // ── Device selector ──
+              if (devices.isNotEmpty) ...[
+                Text(
+                  'Machine',
+                  style: theme.textTheme.titleSmall
+                      ?.copyWith(fontWeight: FontWeight.w700),
+                ),
+                const SizedBox(height: 10),
+                DeviceSelector(
+                  devices: devices,
+                  selectedIndex: selectedIndex >= 0 ? selectedIndex : 0,
+                  onSelected: (i) =>
+                      setState(() => _selectedDeviceId = devices[i].id),
+                ),
+                const SizedBox(height: 18),
               ],
-            ),
+
+              // ── Predict button ──
+              SizedBox(
+                width: double.infinity,
+                height: 52,
+                child: FilledButton.icon(
+                  onPressed: _loading
+                      ? null
+                      : () =>
+                          _runPrediction(machineId: selectedDevice?.id),
+                  icon: _loading
+                      ? const SizedBox(
+                          width: 20,
+                          height: 20,
+                          child: CircularProgressIndicator(
+                            strokeWidth: 2.4,
+                            color: Colors.white,
+                          ),
+                        )
+                      : const Icon(Icons.bolt_rounded),
+                  label: Text(
+                    _loading ? 'Running...' : 'Get prediction',
+                    style: const TextStyle(
+                      fontWeight: FontWeight.w700,
+                      fontSize: 15,
+                    ),
+                  ),
+                ),
+              ),
+              const SizedBox(height: 18),
+
+              // ── Result area ──
+              if (_error != null)
+                _ErrorCard(message: _error!)
+              else if (_prediction != null)
+                _PredictionResultCard(
+                  prediction: _prediction!,
+                  isDark: isDark,
+                )
+              else
+                _EmptyResultCard(muted: muted),
+            ],
           );
         },
       ),
@@ -177,302 +237,108 @@ class _MlPredictionsScreenState extends State<MlPredictionsScreen>
   }
 }
 
-class _MlScreenHeader extends StatelessWidget {
-  const _MlScreenHeader({required this.isDark});
+// ── Empty state ──────────────────────────────────────────────────
+class _EmptyResultCard extends StatelessWidget {
+  const _EmptyResultCard({required this.muted});
 
-  final bool isDark;
-
-  @override
-  Widget build(BuildContext context) {
-    final muted = Theme.of(context).colorScheme.onSurface.withValues(alpha: 0.72);
-
-    return Row(
-      crossAxisAlignment: CrossAxisAlignment.start,
-      children: [
-        Container(
-          width: 54,
-          height: 54,
-          decoration: BoxDecoration(
-            borderRadius: BorderRadius.circular(18),
-            gradient: LinearGradient(
-              begin: Alignment.topLeft,
-              end: Alignment.bottomRight,
-              colors: [
-                MlPredictionsScreen._accent.withValues(alpha: isDark ? 0.42 : 0.22),
-                MlPredictionsScreen._accent.withValues(alpha: 0.06),
-              ],
-            ),
-            border: Border.all(color: MlPredictionsScreen._accent.withValues(alpha: 0.4)),
-            boxShadow: [
-              BoxShadow(
-                color: MlPredictionsScreen._accent.withValues(alpha: isDark ? 0.25 : 0.12),
-                blurRadius: 20,
-                offset: const Offset(0, 10),
-              ),
-            ],
-          ),
-          child: const Icon(Icons.insights_rounded, color: MlPredictionsScreen._accent, size: 28),
-        ),
-        const SizedBox(width: 16),
-        Expanded(
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              Text(
-                'Bearing risk',
-                style: Theme.of(context).textTheme.headlineSmall?.copyWith(
-                      fontWeight: FontWeight.w800,
-                      letterSpacing: -0.6,
-                      height: 1.12,
-                    ),
-              ),
-              const SizedBox(height: 6),
-              Text(
-                'One tap for a fresh risk readout from your API.',
-                style: Theme.of(context).textTheme.bodyMedium?.copyWith(
-                      color: muted,
-                      height: 1.38,
-                    ),
-              ),
-            ],
-          ),
-        ),
-      ],
-    );
-  }
-}
-
-class _ApiUrlField extends StatelessWidget {
-  const _ApiUrlField({required this.controller, required this.isDark});
-
-  final TextEditingController controller;
-  final bool isDark;
+  final Color muted;
 
   @override
   Widget build(BuildContext context) {
-    final outline = Theme.of(context).colorScheme.outline.withValues(alpha: isDark ? 0.38 : 0.22);
-
-    return Container(
-      decoration: BoxDecoration(
-        borderRadius: BorderRadius.circular(20),
-        color: Theme.of(context).colorScheme.surface.withValues(alpha: isDark ? 0.5 : 0.92),
-        border: Border.all(color: outline),
-        boxShadow: [
-          BoxShadow(
-            color: Colors.black.withValues(alpha: isDark ? 0.2 : 0.04),
-            blurRadius: 18,
-            offset: const Offset(0, 6),
-          ),
-        ],
-      ),
-      child: ClipRRect(
-        borderRadius: BorderRadius.circular(19),
-        child: TextField(
-          controller: controller,
-          style: Theme.of(context).textTheme.bodyMedium?.copyWith(
-                fontFeatures: const [FontFeature.tabularFigures()],
-              ),
-          decoration: InputDecoration(
-            isDense: true,
-            hintText: 'Prediction API URL',
-            border: InputBorder.none,
-            prefixIcon: Icon(
-              Icons.hub_rounded,
-              color: MlPredictionsScreen._accent.withValues(alpha: 0.95),
-              size: 24,
+    return Card(
+      child: Padding(
+        padding: const EdgeInsets.symmetric(vertical: 36, horizontal: 14),
+        child: Column(
+          children: [
+            Icon(Icons.show_chart_rounded, size: 40, color: muted),
+            const SizedBox(height: 12),
+            Text(
+              'No prediction yet',
+              style: Theme.of(context)
+                  .textTheme
+                  .titleSmall
+                  ?.copyWith(fontWeight: FontWeight.w700),
             ),
-            contentPadding: const EdgeInsets.symmetric(horizontal: 4, vertical: 16),
-            hintStyle: TextStyle(
-              color: Theme.of(context).colorScheme.onSurface.withValues(alpha: 0.4),
+            const SizedBox(height: 6),
+            Text(
+              'Tap "Get prediction" to fetch a risk assessment from your API.',
+              textAlign: TextAlign.center,
+              style: Theme.of(context)
+                  .textTheme
+                  .bodySmall
+                  ?.copyWith(color: muted, height: 1.4),
             ),
-          ),
-          keyboardType: TextInputType.url,
-          autocorrect: false,
-          textInputAction: TextInputAction.done,
+          ],
         ),
       ),
     );
   }
 }
 
-class _PredictCta extends StatelessWidget {
-  const _PredictCta({
-    required this.loading,
-    required this.pulse,
-    required this.onPressed,
-  });
-
-  final bool loading;
-  final Animation<double> pulse;
-  final VoidCallback? onPressed;
-
-  @override
-  Widget build(BuildContext context) {
-    return AnimatedBuilder(
-      animation: pulse,
-      builder: (context, child) {
-        final breathe = loading ? 0.0 : 0.5 + pulse.value * 0.14;
-        return Material(
-          color: Colors.transparent,
-          child: InkWell(
-            onTap: onPressed,
-            borderRadius: BorderRadius.circular(999),
-            child: AnimatedContainer(
-              duration: const Duration(milliseconds: 260),
-              curve: Curves.easeOutCubic,
-              width: double.infinity,
-              padding: const EdgeInsets.symmetric(vertical: 18),
-              decoration: BoxDecoration(
-                borderRadius: BorderRadius.circular(999),
-                gradient: LinearGradient(
-                  colors: onPressed != null
-                      ? [
-                          MlPredictionsScreen._accent,
-                          Color.lerp(MlPredictionsScreen._accent, const Color(0xFF0891B2), breathe)!,
-                        ]
-                      : [
-                          Theme.of(context).colorScheme.surfaceContainerHighest,
-                          Theme.of(context).colorScheme.surfaceContainerHighest,
-                        ],
-                ),
-                boxShadow: onPressed != null
-                    ? [
-                        BoxShadow(
-                          color: MlPredictionsScreen._accent.withValues(alpha: 0.35 + breathe * 0.12),
-                          blurRadius: 22 + breathe * 8,
-                          offset: const Offset(0, 12),
-                        ),
-                      ]
-                    : null,
-              ),
-              child: Center(
-                child: loading
-                    ? const SizedBox(
-                        width: 26,
-                        height: 26,
-                        child: CircularProgressIndicator(
-                          strokeWidth: 2.6,
-                          color: Colors.white,
-                        ),
-                      )
-                    : Row(
-                        mainAxisSize: MainAxisSize.min,
-                        children: [
-                          const Icon(Icons.bolt_rounded, color: Colors.white, size: 24),
-                          const SizedBox(width: 10),
-                          Text(
-                            'Get prediction',
-                            style: Theme.of(context).textTheme.titleMedium?.copyWith(
-                                  color: Colors.white,
-                                  fontWeight: FontWeight.w800,
-                                  letterSpacing: 0.2,
-                                ),
-                          ),
-                        ],
-                      ),
-              ),
-            ),
-          ),
-        );
-      },
-    );
-  }
-}
-
-class _EmptyState extends StatelessWidget {
-  const _EmptyState({super.key, required this.isDark});
-
-  final bool isDark;
-
-  @override
-  Widget build(BuildContext context) {
-    final muted = Theme.of(context).colorScheme.onSurface.withValues(alpha: 0.55);
-
-    return Column(
-      children: [
-        Container(
-          width: 120,
-          height: 120,
-          decoration: BoxDecoration(
-            shape: BoxShape.circle,
-            border: Border.all(
-              color: MlPredictionsScreen._accent.withValues(alpha: 0.18),
-              width: 2,
-            ),
-            gradient: RadialGradient(
-              colors: [
-                MlPredictionsScreen._accent.withValues(alpha: isDark ? 0.12 : 0.08),
-                Colors.transparent,
-              ],
-            ),
-          ),
-          child: Icon(
-            Icons.show_chart_rounded,
-            size: 48,
-            color: MlPredictionsScreen._accent.withValues(alpha: 0.45),
-          ),
-        ),
-        const SizedBox(height: 20),
-        Text(
-          'Ready when you are',
-          style: Theme.of(context).textTheme.titleMedium?.copyWith(
-                fontWeight: FontWeight.w700,
-              ),
-        ),
-        const SizedBox(height: 8),
-        Padding(
-          padding: const EdgeInsets.symmetric(horizontal: 12),
-          child: Text(
-            'Your latest LOW / HIGH risk call will land here with confidence and split.',
-            textAlign: TextAlign.center,
-            style: Theme.of(context).textTheme.bodySmall?.copyWith(color: muted, height: 1.45),
-          ),
-        ),
-      ],
-    );
-  }
-}
-
-class _ErrorPanel extends StatelessWidget {
-  const _ErrorPanel({super.key, required this.message});
+// ── Error card ───────────────────────────────────────────────────
+class _ErrorCard extends StatelessWidget {
+  const _ErrorCard({required this.message});
 
   final String message;
 
   @override
   Widget build(BuildContext context) {
     final err = Theme.of(context).colorScheme.error;
+    final isDark = Theme.of(context).brightness == Brightness.dark;
 
-    return Container(
-      width: double.infinity,
-      padding: const EdgeInsets.all(18),
-      decoration: BoxDecoration(
-        borderRadius: BorderRadius.circular(22),
-        color: err.withValues(alpha: 0.1),
-        border: Border.all(color: err.withValues(alpha: 0.35)),
+    return Card(
+      shape: RoundedRectangleBorder(
+        borderRadius: BorderRadius.circular(16),
+        side: BorderSide(color: err.withValues(alpha: 0.4)),
       ),
-      child: Row(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          Icon(Icons.wifi_tethering_error_rounded, color: err, size: 26),
-          const SizedBox(width: 12),
-          Expanded(
-            child: Text(
-              message,
-              style: Theme.of(context).textTheme.bodyMedium?.copyWith(
-                    color: err,
-                    height: 1.4,
-                  ),
+      child: Padding(
+        padding: const EdgeInsets.all(14),
+        child: Row(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Container(
+              width: 36,
+              height: 36,
+              decoration: BoxDecoration(
+                color: err.withValues(alpha: 0.15),
+                shape: BoxShape.circle,
+              ),
+              child: Icon(Icons.wifi_tethering_error_rounded,
+                  color: err, size: 20),
             ),
-          ),
-        ],
+            const SizedBox(width: 12),
+            Expanded(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(
+                    'Prediction failed',
+                    style: TextStyle(
+                        fontWeight: FontWeight.w600,
+                        fontSize: 14,
+                        color: err),
+                  ),
+                  const SizedBox(height: 4),
+                  Text(
+                    message,
+                    style: Theme.of(context).textTheme.bodySmall?.copyWith(
+                          color: err.withValues(alpha: 0.85),
+                          height: 1.4,
+                        ),
+                  ),
+                ],
+              ),
+            ),
+          ],
+        ),
       ),
     );
   }
 }
 
-class _PredictionShowcase extends StatelessWidget {
-  const _PredictionShowcase({
-    super.key,
+// ── Prediction result card ───────────────────────────────────────
+class _PredictionResultCard extends StatelessWidget {
+  const _PredictionResultCard({
     required this.prediction,
     required this.isDark,
   });
@@ -487,10 +353,15 @@ class _PredictionShowcase extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    final theme = Theme.of(context);
     final high = _isHighRisk(prediction.prediction);
-    final riskColor = high ? const Color(0xFFFB7185) : const Color(0xFF4ADE80);
-    final riskGlow = high ? const Color(0xFFEF4444) : const Color(0xFF22C55E);
-    final label = prediction.prediction.replaceAll('_', ' ').toUpperCase();
+    final statusColor =
+        high ? const Color(0xFFEF4444) : const Color(0xFF22C55E);
+    final label =
+        prediction.prediction.replaceAll('_', ' ').toUpperCase();
+    final muted = theme.colorScheme.onSurface.withValues(alpha: 0.55);
+    final subtleBorder =
+        isDark ? const Color(0xFF232A34) : const Color(0xFFDCE4EE);
 
     double pickProb(bool wantHigh) {
       final directLow = prediction.probabilities['LOW_RISK'];
@@ -507,111 +378,113 @@ class _PredictionShowcase extends StatelessWidget {
 
     final lowP = pickProb(false);
     final highP = pickProb(true);
+    final confidence = prediction.confidence;
+    final confPct = (confidence.clamp(0.0, 1.0) * 100).round();
 
-    return TweenAnimationBuilder<double>(
-      tween: Tween(begin: 0, end: 1),
-      duration: const Duration(milliseconds: 420),
-      curve: Curves.easeOutCubic,
-      builder: (context, t, child) {
-        return Opacity(
-          opacity: t,
-          child: Transform.translate(
-            offset: Offset(0, 12 * (1 - t)),
-            child: child,
-          ),
-        );
-      },
-      child: Container(
-        width: double.infinity,
-        padding: const EdgeInsets.fromLTRB(22, 24, 22, 20),
-        decoration: BoxDecoration(
-          borderRadius: BorderRadius.circular(28),
-          gradient: LinearGradient(
-            begin: Alignment.topLeft,
-            end: Alignment.bottomRight,
-            colors: [
-              Theme.of(context).colorScheme.surface.withValues(alpha: isDark ? 0.85 : 0.98),
-              Theme.of(context).colorScheme.surface.withValues(alpha: isDark ? 0.55 : 0.92),
-            ],
-          ),
-          border: Border.all(
-            color: riskColor.withValues(alpha: 0.45),
-            width: 1.5,
-          ),
-          boxShadow: [
-            BoxShadow(
-              color: riskGlow.withValues(alpha: isDark ? 0.22 : 0.14),
-              blurRadius: 32,
-              spreadRadius: -4,
-              offset: const Offset(0, 18),
-            ),
-          ],
-        ),
+    return Card(
+      shape: RoundedRectangleBorder(
+        borderRadius: BorderRadius.circular(16),
+        side: BorderSide(color: statusColor.withValues(alpha: 0.4)),
+      ),
+      child: Padding(
+        padding: const EdgeInsets.all(16),
         child: Column(
-          crossAxisAlignment: CrossAxisAlignment.stretch,
+          crossAxisAlignment: CrossAxisAlignment.start,
           children: [
+            // Header
+            Text(
+              'Prediction Result',
+              style: theme.textTheme.titleSmall
+                  ?.copyWith(fontWeight: FontWeight.w700),
+            ),
+            const SizedBox(height: 14),
+
+            // Status badge + confidence
             Row(
               children: [
-                Expanded(
-                  child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
+                Container(
+                  padding: const EdgeInsets.symmetric(
+                      horizontal: 12, vertical: 7),
+                  decoration: BoxDecoration(
+                    color: statusColor.withValues(alpha: 0.15),
+                    borderRadius: BorderRadius.circular(999),
+                    border: Border.all(
+                        color: statusColor.withValues(alpha: 0.5)),
+                  ),
+                  child: Row(
+                    mainAxisSize: MainAxisSize.min,
                     children: [
-                      Text(
-                        'Current assessment',
-                        style: Theme.of(context).textTheme.labelMedium?.copyWith(
-                              letterSpacing: 1.1,
-                              fontWeight: FontWeight.w700,
-                              color: Theme.of(context).colorScheme.onSurface.withValues(alpha: 0.55),
-                            ),
-                      ),
-                      const SizedBox(height: 10),
+                      Icon(Icons.circle, size: 10, color: statusColor),
+                      const SizedBox(width: 8),
                       Text(
                         label,
-                        style: Theme.of(context).textTheme.headlineMedium?.copyWith(
-                              fontWeight: FontWeight.w900,
-                              letterSpacing: -0.8,
-                              color: riskColor,
-                              height: 1.05,
-                            ),
+                        style: TextStyle(
+                          fontWeight: FontWeight.w700,
+                          color: statusColor,
+                        ),
                       ),
                     ],
                   ),
                 ),
-                _ConfidenceRing(confidence: prediction.confidence, accent: riskColor),
-              ],
-            ),
-            const SizedBox(height: 22),
-            Row(
-              children: [
-                Expanded(
-                  child: _ProbPill(
-                    label: 'Low risk',
-                    value: lowP,
-                    active: !high,
-                    color: const Color(0xFF22C55E),
-                  ),
-                ),
-                const SizedBox(width: 12),
-                Expanded(
-                  child: _ProbPill(
-                    label: 'High risk',
-                    value: highP,
-                    active: high,
-                    color: const Color(0xFFEF4444),
-                  ),
-                ),
-              ],
-            ),
-            const SizedBox(height: 18),
-            Text(
-              '${prediction.rawReadingsFetched} samples · '
-              '${prediction.windowHoursUsed}h window · '
-              'updated ${_formatTimestamp(prediction.timestamp)}',
-              textAlign: TextAlign.center,
-              style: Theme.of(context).textTheme.labelSmall?.copyWith(
-                    color: Theme.of(context).colorScheme.onSurface.withValues(alpha: 0.45),
+                const Spacer(),
+                Text(
+                  '$confPct% confidence',
+                  style: theme.textTheme.bodyMedium?.copyWith(
+                    fontWeight: FontWeight.w700,
                     fontFeatures: const [FontFeature.tabularFigures()],
                   ),
+                ),
+              ],
+            ),
+            const SizedBox(height: 16),
+
+            // Probability details
+            Container(
+              padding: const EdgeInsets.all(12),
+              decoration: BoxDecoration(
+                borderRadius: BorderRadius.circular(12),
+                color: isDark
+                    ? const Color(0xFF111821)
+                    : const Color(0xFFF4F7FB),
+                border: Border.all(color: subtleBorder),
+              ),
+              child: Column(
+                children: [
+                  _ProbRow(
+                    label: 'Low Risk',
+                    value: lowP,
+                    color: const Color(0xFF22C55E),
+                    active: !high,
+                  ),
+                  const SizedBox(height: 10),
+                  _ProbRow(
+                    label: 'High Risk',
+                    value: highP,
+                    color: const Color(0xFFEF4444),
+                    active: high,
+                  ),
+                ],
+              ),
+            ),
+            const SizedBox(height: 12),
+
+            // Meta info
+            Row(
+              children: [
+                Icon(Icons.data_usage_rounded, size: 14, color: muted),
+                const SizedBox(width: 6),
+                Expanded(
+                  child: Text(
+                    '${prediction.rawReadingsFetched} samples · '
+                    '${prediction.windowHoursUsed}h window · '
+                    'updated ${_formatTimestamp(prediction.timestamp)}',
+                    style: theme.textTheme.labelSmall?.copyWith(
+                      color: muted,
+                      fontFeatures: const [FontFeature.tabularFigures()],
+                    ),
+                  ),
+                ),
+              ],
             ),
           ],
         ),
@@ -627,116 +500,63 @@ class _PredictionShowcase extends StatelessWidget {
   }
 }
 
-class _ConfidenceRing extends StatelessWidget {
-  const _ConfidenceRing({required this.confidence, required this.accent});
-
-  final double confidence;
-  final Color accent;
-
-  @override
-  Widget build(BuildContext context) {
-    final pct = (confidence.clamp(0.0, 1.0) * 100).round();
-
-    return SizedBox(
-      width: 86,
-      height: 86,
-      child: Stack(
-        alignment: Alignment.center,
-        children: [
-          SizedBox(
-            width: 86,
-            height: 86,
-            child: CircularProgressIndicator(
-              value: confidence.clamp(0.0, 1.0),
-              strokeWidth: 5,
-              backgroundColor: accent.withValues(alpha: 0.15),
-              color: accent,
-              strokeCap: StrokeCap.round,
-            ),
-          ),
-          Column(
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              Text(
-                '$pct%',
-                style: Theme.of(context).textTheme.titleLarge?.copyWith(
-                      fontWeight: FontWeight.w900,
-                      height: 1,
-                    ),
-              ),
-              Text(
-                'conf.',
-                style: Theme.of(context).textTheme.labelSmall?.copyWith(
-                      color: Theme.of(context).colorScheme.onSurface.withValues(alpha: 0.55),
-                      fontWeight: FontWeight.w600,
-                    ),
-              ),
-            ],
-          ),
-        ],
-      ),
-    );
-  }
-}
-
-class _ProbPill extends StatelessWidget {
-  const _ProbPill({
+// ── Probability row ──────────────────────────────────────────────
+class _ProbRow extends StatelessWidget {
+  const _ProbRow({
     required this.label,
     required this.value,
-    required this.active,
     required this.color,
+    required this.active,
   });
 
   final String label;
   final double value;
-  final bool active;
   final Color color;
+  final bool active;
 
   @override
   Widget build(BuildContext context) {
-    return AnimatedContainer(
-      duration: const Duration(milliseconds: 280),
-      curve: Curves.easeOutCubic,
-      padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 12),
-      decoration: BoxDecoration(
-        borderRadius: BorderRadius.circular(16),
-        color: color.withValues(alpha: active ? 0.18 : 0.06),
-        border: Border.all(
-          color: color.withValues(alpha: active ? 0.55 : 0.15),
-          width: active ? 1.5 : 1,
+    final theme = Theme.of(context);
+
+    return Row(
+      children: [
+        Icon(
+          active ? Icons.check_circle_rounded : Icons.circle_outlined,
+          size: 16,
+          color: color,
         ),
-      ),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          Text(
+        const SizedBox(width: 8),
+        Expanded(
+          child: Text(
             label,
-            style: Theme.of(context).textTheme.labelMedium?.copyWith(
-                  fontWeight: FontWeight.w700,
-                  color: Theme.of(context).colorScheme.onSurface.withValues(alpha: 0.7),
-                ),
+            style: theme.textTheme.bodySmall?.copyWith(
+              color: theme.colorScheme.onSurface.withValues(alpha: 0.6),
+              fontWeight: active ? FontWeight.w700 : FontWeight.w400,
+            ),
           ),
-          const SizedBox(height: 4),
-          Text(
-            '${(value * 100).toStringAsFixed(1)}%',
-            style: Theme.of(context).textTheme.titleLarge?.copyWith(
-                  fontWeight: FontWeight.w800,
-                  color: color,
-                  fontFeatures: const [FontFeature.tabularFigures()],
-                ),
-          ),
-          const SizedBox(height: 8),
-          ClipRRect(
+        ),
+        SizedBox(
+          width: 100,
+          child: ClipRRect(
             borderRadius: BorderRadius.circular(4),
             child: LinearProgressIndicator(
               value: value.clamp(0.0, 1.0),
-              minHeight: 5,
+              minHeight: 6,
               backgroundColor: color.withValues(alpha: 0.12),
               color: color,
             ),
           ),
-        ],
-      ),
+        ),
+        const SizedBox(width: 10),
+        Text(
+          '${(value * 100).toStringAsFixed(1)}%',
+          style: theme.textTheme.bodySmall?.copyWith(
+            fontWeight: FontWeight.w700,
+            color: active ? color : null,
+            fontFeatures: const [FontFeature.tabularFigures()],
+          ),
+        ),
+      ],
     );
   }
 }

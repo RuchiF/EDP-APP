@@ -111,7 +111,6 @@ class _AppShellState extends State<AppShell> {
   Widget build(BuildContext context) {
     final pages = <Widget>[
       const DashboardScreen(),
-      const AlertsScreen(),
       const FaultsScreen(),
       const MlPredictionsScreen(),
     ];
@@ -135,11 +134,6 @@ class _AppShellState extends State<AppShell> {
             icon: Icon(Icons.dashboard_outlined),
             selectedIcon: Icon(Icons.dashboard_rounded),
             label: 'Dashboard',
-          ),
-          NavigationDestination(
-            icon: Icon(Icons.warning_amber_outlined),
-            selectedIcon: Icon(Icons.warning_amber_rounded),
-            label: 'Alerts',
           ),
           NavigationDestination(
             icon: Icon(Icons.report_problem_outlined),
