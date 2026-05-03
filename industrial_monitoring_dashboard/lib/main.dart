@@ -6,6 +6,8 @@ import 'package:firebase_core/firebase_core.dart';
 import 'package:fl_chart/fl_chart.dart';
 import 'package:flutter/material.dart';
 import 'package:industrial_monitoring_dashboard/alert_notification_service.dart';
+import 'package:industrial_monitoring_dashboard/devices_catalog.dart';
+import 'package:industrial_monitoring_dashboard/ml_predictions_screen.dart';
 import 'package:intl/intl.dart';
 import 'package:shimmer/shimmer.dart';
 
@@ -110,6 +112,7 @@ class _AppShellState extends State<AppShell> {
     final pages = <Widget>[
       const DashboardScreen(),
       const AlertsScreen(),
+      const MlPredictionsScreen(),
     ];
 
     return Scaffold(
@@ -137,6 +140,11 @@ class _AppShellState extends State<AppShell> {
             selectedIcon: Icon(Icons.warning_amber_rounded),
             label: 'Alerts',
           ),
+          NavigationDestination(
+            icon: Icon(Icons.psychology_outlined),
+            selectedIcon: Icon(Icons.psychology_rounded),
+            label: 'ML',
+          ),
         ],
       ),
     );
@@ -144,13 +152,6 @@ class _AppShellState extends State<AppShell> {
 }
 
 enum HealthStatus { normal, warning, fault }
-
-class Device {
-  const Device({required this.id, required this.label});
-
-  final String id;
-  final String label;
-}
 
 class SensorReading {
   const SensorReading({
@@ -211,22 +212,6 @@ SensorReading newestReading(List<SensorReading> readings) {
     ..sort((a, b) => a.timestamp.compareTo(b.timestamp));
   return sorted.last;
 }
-
-Stream<List<Device>> devicesStream() => FirebaseFirestore.instance
-    .collection('devices')
-    .snapshots()
-    .map(
-      (snapshot) {
-        final list = snapshot.docs
-            .map((doc) => Device(id: doc.id, label: doc.id.toUpperCase()))
-            .toList(growable: false);
-        debugPrint(
-          '[Firestore] devices loaded: count=${list.length} '
-          'ids=[${list.map((d) => d.id).join(', ')}]',
-        );
-        return list;
-      },
-    );
 
 Stream<List<SensorReading>> sensorReadingsStream(String deviceId) =>
     FirebaseFirestore.instance
@@ -640,72 +625,6 @@ class _Header extends StatelessWidget {
           ).textTheme.bodyMedium?.copyWith(color: Colors.white70),
         ),
       ],
-    );
-  }
-}
-
-class DeviceSelector extends StatelessWidget {
-  const DeviceSelector({
-    super.key,
-    required this.devices,
-    required this.selectedIndex,
-    required this.onSelected,
-  });
-
-  final List<Device> devices;
-  final int selectedIndex;
-  final ValueChanged<int> onSelected;
-
-  @override
-  Widget build(BuildContext context) {
-    final isDark = Theme.of(context).brightness == Brightness.dark;
-    return SizedBox(
-      height: 88,
-      child: ListView.separated(
-        scrollDirection: Axis.horizontal,
-        itemBuilder: (context, index) {
-          final device = devices[index];
-          final selected = index == selectedIndex;
-          return GestureDetector(
-            onTap: () => onSelected(index),
-            child: AnimatedContainer(
-              duration: const Duration(milliseconds: 220),
-              width: 185,
-              padding: const EdgeInsets.all(12),
-              decoration: BoxDecoration(
-                color: selected
-                    ? const Color(0x3320C5D6)
-                    : isDark
-                        ? const Color(0xFF151B23)
-                        : Colors.white,
-                borderRadius: BorderRadius.circular(14),
-                border: Border.all(
-                  color: selected ? const Color(0xFF1FC9DA) : const Color(0xFF2A3340),
-                ),
-              ),
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                mainAxisAlignment: MainAxisAlignment.center,
-                children: [
-                  Text(
-                    device.label,
-                    maxLines: 1,
-                    overflow: TextOverflow.ellipsis,
-                    style: const TextStyle(fontWeight: FontWeight.w600),
-                  ),
-                  const SizedBox(height: 8),
-                  Text(
-                    device.id.toUpperCase(),
-                    style: const TextStyle(color: Colors.white70, fontSize: 12),
-                  ),
-                ],
-              ),
-            ),
-          );
-        },
-        separatorBuilder: (_, _) => const SizedBox(width: 12),
-        itemCount: devices.length,
-      ),
     );
   }
 }
