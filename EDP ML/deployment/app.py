@@ -156,39 +156,60 @@ class PredictResponse(BaseModel):
 # ── Preprocessing Functions ──────────────────────────────────────
 def fetch_sensor_data(machine_id: Optional[str] = None, limit: int = 7200):
     """Fetch latest raw sensor readings from Firestore 'data' collection."""
-    if db is None:
-        raise HTTPException(503, "Firestore not connected")
+    try:
+        if db is None:
+            raise HTTPException(503, "Firestore not connected")
 
-    from google.cloud.firestore_v1 import query as fquery
-    collection_ref = db.collection("data")
-    query = collection_ref.order_by(
-        "timestamp",
-        direction=fquery.Query.DESCENDING,
-    ).limit(limit)
+        from google.cloud.firestore_v1 import query as fquery
+        collection_ref = db.collection("data")
+        query = collection_ref.order_by(
+            "timestamp",
+            direction=fquery.Query.DESCENDING,
+        ).limit(limit)
 
-    docs = query.stream()
-    records = []
-    for doc in docs:
-        d = doc.to_dict()
-        # Map status to pseudo-label for feature compat
-        status = d.get("status", "NORMAL")
-        if status == "FAULT":
-            d["label"] = 2
-        elif status == "WARNING":
-            d["label"] = 1
-        else:
-            d["label"] = 0
-        # Ensure boolean→int for aggregation
-        d["temp_alert"] = int(d.get("temp_alert", False))
-        d["vibration"] = int(d.get("vibration", False))
-        records.append(d)
+        docs = query.stream()
+        records = []
+        for doc in docs:
+            d = doc.to_dict()
+            status = d.get("status", "NORMAL")
+            if status == "FAULT":
+                d["label"] = 2
+            elif status == "WARNING":
+                d["label"] = 1
+            else:
+                d["label"] = 0
+            d["temp_alert"] = int(d.get("temp_alert", False))
+            d["vibration"] = int(d.get("vibration", False))
+            records.append(d)
 
-    if not records:
-        raise HTTPException(404, "No sensor data found in Firestore")
+        if not records:
+            raise HTTPException(404, "No sensor data found in Firestore")
 
-    df = pd.DataFrame(records)
-    df = df.sort_values("timestamp").reset_index(drop=True)
-    return df
+        df = pd.DataFrame(records)
+        df = df.sort_values("timestamp").reset_index(drop=True)
+        return df, False  # is_fallback = False
+
+    except Exception as e:
+        if "Quota" in str(e) or "429" in str(e) or getattr(e, "code", None) == 429:
+            logger.warning(f"Firestore quota exceeded ({e}). Using local fallback data.")
+            # Fallback to local CSV
+            csv_path = os.path.join(os.path.dirname(BASE_DIR), "sample_training_data (1).csv")
+            if not os.path.exists(csv_path):
+                raise HTTPException(500, "Firestore quota exceeded and no fallback data found.")
+            
+            df = pd.read_csv(csv_path)
+            # Ensure bools are ints
+            if "temp_alert" in df.columns:
+                df["temp_alert"] = df["temp_alert"].astype(int)
+            if "vibration" in df.columns:
+                df["vibration"] = df["vibration"].astype(int)
+            
+            # Take the last `limit` rows to simulate fetching the latest data
+            df = df.tail(limit).reset_index(drop=True)
+            return df, True  # is_fallback = True
+        
+        # Re-raise if it's not a quota error
+        raise e
 
 
 def hourly_aggregate(df: pd.DataFrame) -> pd.DataFrame:
@@ -305,9 +326,9 @@ def run_prediction(machine_id: Optional[str] = None) -> dict:
     # 1. Fetch raw data
     window = config["window_hours"]
     needed_readings = window * 60  # 1-minute intervals
-    raw_df = fetch_sensor_data(machine_id, limit=needed_readings)
+    raw_df, is_fallback = fetch_sensor_data(machine_id, limit=needed_readings)
     n_raw = len(raw_df)
-    logger.info(f"Fetched {n_raw} raw readings")
+    logger.info(f"Fetched {n_raw} raw readings (fallback: {is_fallback})")
 
     # 2. Hourly aggregation
     hourly_df = hourly_aggregate(raw_df)
@@ -324,6 +345,10 @@ def run_prediction(machine_id: Optional[str] = None) -> dict:
     proba = model.predict_proba(X_scaled)[0]
     class_label = config["classes"][int(pred)]  # "LOW_RISK" or "HIGH_RISK"
     confidence = float(np.max(proba))
+    
+    timestamp_str = datetime.now(timezone.utc).isoformat()
+    if is_fallback:
+        timestamp_str += " (Quota Exceeded: Using Local Data)"
 
     return PredictResponse(
         prediction=class_label,
@@ -334,7 +359,7 @@ def run_prediction(machine_id: Optional[str] = None) -> dict:
         },
         window_hours_used=window,
         raw_readings_fetched=n_raw,
-        timestamp=datetime.now(timezone.utc).isoformat(),
+        timestamp=timestamp_str,
     )
 
 
