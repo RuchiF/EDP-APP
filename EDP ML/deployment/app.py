@@ -11,7 +11,7 @@ Endpoints:
   POST /predict       → prediction (JSON body: {"machine_id": "X"})
 """
 
-import os, json, base64, tempfile, logging
+import os, json, base64, tempfile, logging, traceback
 from datetime import datetime, timezone
 from contextlib import asynccontextmanager
 
@@ -19,6 +19,7 @@ import joblib
 import numpy as np
 import pandas as pd
 from fastapi import FastAPI, HTTPException, Query
+from fastapi.responses import JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from typing import Optional
@@ -128,6 +129,17 @@ app.add_middleware(
 )
 
 
+@app.exception_handler(Exception)
+async def global_exception_handler(request, exc):
+    """Return detailed error info instead of generic 500."""
+    tb = traceback.format_exc()
+    logger.error(f"Unhandled error: {exc}\n{tb}")
+    return JSONResponse(
+        status_code=500,
+        content={"detail": str(exc), "traceback": tb},
+    )
+
+
 # ── Request / Response Schemas ───────────────────────────────────
 class PredictRequest(BaseModel):
     machine_id: Optional[str] = None
@@ -147,10 +159,11 @@ def fetch_sensor_data(machine_id: Optional[str] = None, limit: int = 7200):
     if db is None:
         raise HTTPException(503, "Firestore not connected")
 
+    from google.cloud.firestore_v1 import query as fquery
     collection_ref = db.collection("data")
     query = collection_ref.order_by(
         "timestamp",
-        direction="DESCENDING"  # use google.cloud.firestore_v1.base_query
+        direction=fquery.Query.DESCENDING,
     ).limit(limit)
 
     docs = query.stream()
