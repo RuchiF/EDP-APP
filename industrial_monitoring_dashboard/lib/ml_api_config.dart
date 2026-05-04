@@ -11,6 +11,6 @@ class MlApiConfig {
 
   static const String embeddedBaseUrl = String.fromEnvironment(
     'ML_API_BASE_URL',
-    defaultValue: 'https://bearing-fault-predictor.onrender.com',
+    defaultValue: 'https://edp-app-q1nx.onrender.com',
   );
 }

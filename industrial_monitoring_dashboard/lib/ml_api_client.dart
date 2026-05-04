@@ -120,7 +120,7 @@ double? _toDouble(dynamic value) {
 
 String _normalizeBase(String raw) {
   final t = raw.trim();
-  if (t.isEmpty) return 'https://bearing-fault-predictor.onrender.com';
+  if (t.isEmpty) return 'https://edp-app-q1nx.onrender.com';
   return t.endsWith('/') ? t.substring(0, t.length - 1) : t;
 }
 
