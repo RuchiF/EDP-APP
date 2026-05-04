@@ -348,7 +348,8 @@ def run_prediction(machine_id: Optional[str] = None) -> dict:
     
     timestamp_str = datetime.now(timezone.utc).isoformat()
     if is_fallback:
-        timestamp_str += " (Quota Exceeded: Using Local Data)"
+        class_label += " (Quota reached 429 - falling back to local)"
+        timestamp_str += " (Fallback used)"
 
     return PredictResponse(
         prediction=class_label,
